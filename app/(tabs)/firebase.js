@@ -1,8 +1,8 @@
 import { initializeApp } from "firebase/app";
-// We need 'getFunctions' and 'httpsCallable'
+import { getFirestore } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
 
-// Your web app's Firebase configuration
+// web app's Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCgzUcHVCNWFNsFdh8iSq18M9Hvkj4o40g",
   authDomain: "elderlyapp-dabda.firebaseapp.com",
@@ -16,9 +16,9 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Get a reference to the Cloud Functions
+// --- AI Chatbot ---
 const functions = getFunctions(app);
-
-// Create an exportable connection to your specific deployed function
-// 'getAiChatResponse' must match the name in your functions/index.js
 export const getAiChatResponse = httpsCallable(functions, 'getAiChatResponse');
+
+// Initialize and export the Firestore database
+export const db = getFirestore(app);
