@@ -1,31 +1,79 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Link } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useNavigation } from '@react-navigation/native';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   Dimensions,
+  KeyboardAvoidingView,
   LayoutAnimation,
   Platform,
   ScrollView,
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   UIManager,
-  View
+  View,
 } from 'react-native';
 import { GiftedChat, IMessage } from 'react-native-gifted-chat';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+// Firebase
+import { getApp, initializeApp } from 'firebase/app';
+import {
+  createUserWithEmailAndPassword,
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  User,
+} from 'firebase/auth';
+import { doc, getDoc, getFirestore, setDoc } from 'firebase/firestore';
 
 // --- Firebase & AI ---
-import { getAiChatResponse } from './firebase';
+import { getAiChatResponse } from './firebase.js';
 
-// --- Constants ---
+// Canvas variables
+declare const __app_id: string;
+declare const __firebase_config: string;
+
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// Safe Firebase init 
+let auth: any;
+let db: any;
+try {
+  const app = getApp();
+  auth = getAuth(app);
+  db = getFirestore(app);
+} catch (e: any) {
+  if (e.code === 'app/no-app') {
+    const config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+    const app = initializeApp(config);
+    auth = getAuth(app);
+    db = getFirestore(app);
+  }
+}
+
+type UserRole = 'elderly' | 'caregiver';
+type UserProfile = {
+  name: string;
+  email: string;
+  role: UserRole;
+  linkedCaregiverId: string | null;
+  linkedElderlyId: string | null;
+  createdAt: string;
+};
+
+
+// Colors & Constants
 const { width } = Dimensions.get('window');
 const COLORS = {
   primaryBlue: '#007AFF',
-  darkBlue: '#004AAD', // Darker blue for highlights
+  darkBlue: '#004AAD',
   lightBlue: '#E6F2FF',
   white: '#FFFFFF',
   black: '#000000',
@@ -40,42 +88,126 @@ const COLORS = {
 };
 const WEEK_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-if (Platform.OS === 'android') {
-  if (UIManager.setLayoutAnimationEnabledExperimental) {
-    UIManager.setLayoutAnimationEnabledExperimental(true);
-  }
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-// --- Reusable Components ---
-const Card = ({ children, style }: { children: React.ReactNode, style?: any }) => (
+// Reusable Components
+const Card = ({ children, style }: { children: React.ReactNode; style?: any }) => (
   <View style={[styles.card, style]}>{children}</View>
 );
 
-const TaskItem = ({ icon, title, time, status, statusColor, onPress }: { icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'], title: string, time: string, status?: string, statusColor?: string, onPress?: () => void }) => (
+const TaskItem = ({
+  icon,
+  title,
+  time,
+  status,
+  statusColor,
+  onPress,
+}: {
+  icon: any;
+  title: string;
+  time: string;
+  status?: string;
+  statusColor?: string;
+  onPress?: () => void;
+}) => (
   <TouchableOpacity style={styles.taskItem} onPress={onPress}>
     <View style={styles.taskIconContainer}>
-      <MaterialCommunityIcons
-        name={icon}
-        size={24}
-        color={COLORS.primaryBlue}
-      />
+      <MaterialCommunityIcons name={icon} size={24} color={COLORS.primaryBlue} />
     </View>
     <View style={styles.taskTextContainer}>
       <Text style={styles.taskTitle}>{title}</Text>
       <Text style={styles.taskTime}>{time}</Text>
     </View>
-    {status && (
-      <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>
-    )}
+    {status && <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>}
   </TouchableOpacity>
 );
 
-// --- Screen Components ---
+// Login / Sign Up Screen
+const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [role, setRole] = useState<UserRole>('elderly');
+  const [loading, setLoading] = useState(false);
 
-const ElderlyDashboard = (props: any) => (
+  const handleAuth = async () => {
+    if (!email || !password || (!isLogin && !name)) {
+      Alert.alert('Error', 'Please fill all fields');
+      return;
+    }
+    setLoading(true);
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await setDoc(doc(db, 'users', cred.user.uid), {
+          name,
+          email,
+          role,
+          linkedCaregiverId: null,
+          linkedElderlyId: null,
+          createdAt: new Date().toISOString(),
+        });
+      }
+      onSuccess();
+    } catch (e: any) {
+      Alert.alert('Error', e.message || 'Something went wrong');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.white }}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+        <ScrollView contentContainerStyle={styles.authContainer}>
+          <Ionicons name="heart-outline" size={100} color={COLORS.primaryBlue} />
+          <Text style={styles.authTitle}>{isLogin ? 'Welcome Back' : 'Create Account'}</Text>
+
+          {!isLogin && (
+            <TextInput style={styles.input} placeholder="Your Name" value={name} onChangeText={setName} />
+          )}
+          <TextInput style={styles.input} placeholder="Email" keyboardType="email-address" autoCapitalize="none" value={email} onChangeText={setEmail} />
+          <TextInput style={styles.input} placeholder="Password" secureTextEntry value={password} onChangeText={setPassword} />
+
+          {!isLogin && (
+            <View style={styles.roleContainer}>
+              <Text style={styles.roleLabel}>I am signing up as:</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginTop: 10 }}>
+                <TouchableOpacity style={[styles.roleBtn, role === 'elderly' && styles.roleActive]} onPress={() => setRole('elderly')}>
+                  <Text style={role === 'elderly' ? styles.roleTextActive : styles.roleText}>Elderly</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.roleBtn, role === 'caregiver' && styles.roleActive]} onPress={() => setRole('caregiver')}>
+                  <Text style={role === 'caregiver' ? styles.roleTextActive : styles.roleText}>Caregiver</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
+          <TouchableOpacity style={styles.authButton} onPress={handleAuth} disabled={loading}>
+            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.authButtonText}>{isLogin ? 'Log In' : 'Sign Up'}</Text>}
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={() => setIsLogin(!isLogin)} style={{ marginTop: 20 }}>
+            <Text style={styles.switchText}>
+              {isLogin ? "Don't have an account? Sign Up" : 'Already have an account? Log In'}
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+};
+
+//  screens 
+const ElderlyDashboard = ({ userName }: { userName: string }) => (
   <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
     <View style={styles.header}>
-      <Text style={styles.headerTitle}>Hello, Eleanor</Text>
+      <Text style={styles.headerTitle}>Hello, {userName}</Text>
       <TouchableOpacity>
         <Ionicons name="mic-outline" size={30} color={COLORS.primaryBlue} />
       </TouchableOpacity>
@@ -107,9 +239,7 @@ const ElderlyDashboard = (props: any) => (
     </Card>
 
     <Card style={styles.nextReminderCard}>
-      <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>
-        Next Reminder
-      </Text>
+      <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>Next Reminder</Text>
       <View style={styles.reminderItem}>
         <Ionicons name="time-outline" size={24} color={COLORS.white} />
         <View style={styles.reminderText}>
@@ -121,12 +251,11 @@ const ElderlyDashboard = (props: any) => (
   </ScrollView>
 );
 
-const CaregiverDashboard = (props: any) => (
+const CaregiverDashboard = ({ elderlyName }: { elderlyName: string }) => (
   <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
     <View style={styles.header}>
-      <Text style={styles.headerTitle}>Eleanor's Dashboard</Text>
+      <Text style={styles.headerTitle}>{elderlyName}'s Dashboard</Text>
     </View>
-
     <Card>
       <Text style={styles.cardTitle}>Today's Status</Text>
       <Text style={styles.cardSubtitle}>Last updated: 9:00 AM</Text>
@@ -145,37 +274,19 @@ const CaregiverDashboard = (props: any) => (
         </View>
       </View>
     </Card>
-
     <Card>
       <Text style={styles.cardTitle}>Today's Tasks</Text>
-      <TaskItem
-        icon="pill"
-        title="Heart Medication"
-        time="10:00 AM (Daily)"
-        status="Completed"
-        statusColor={COLORS.green}
-      />
+      <TaskItem icon="pill" title="Heart Medication" time="10:00 AM (Daily)" status="Completed" statusColor={COLORS.green} />
       <View style={styles.divider} />
-      <TaskItem
-        icon="food-apple-outline"
-        title="Lunch with Diana"
-        time="1:00 PM"
-        status="Pending"
-        statusColor={COLORS.pending}
-      />
+      <TaskItem icon="food-apple-outline" title="Lunch with Diana" time="1:00 PM" status="Pending" statusColor={COLORS.pending} />
       <View style={styles.divider} />
-      <TaskItem
-        icon="pill"
-        title="Evening Medication"
-        time="8:00 PM"
-        status="Pending"
-        statusColor={COLORS.pending}
-      />
+      <TaskItem icon="pill" title="Evening Medication" time="8:00 PM" status="Pending" statusColor={COLORS.pending} />
     </Card>
   </ScrollView>
 );
 
 const RemindersScreen = () => {
+  const navigation = useNavigation();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [isCalendarExpanded, setCalendarExpanded] = useState(false);
@@ -208,15 +319,9 @@ const RemindersScreen = () => {
       const isSelected = selectedDate && date.toDateString() === selectedDate.toDateString();
 
       week.push(
-        <TouchableOpacity
-          key={day}
-          style={styles.calendarDay}
-          onPress={() => setSelectedDate(date)}
-        >
+        <TouchableOpacity key={day} style={styles.calendarDay} onPress={() => setSelectedDate(date)}>
           <View style={[styles.dayTextContainer, isSelected && styles.selectedDay]}>
-            <Text style={isSelected ? styles.selectedDayText : styles.calendarDayText}>
-              {day}
-            </Text>
+            <Text style={isSelected ? styles.selectedDayText : styles.calendarDayText}>{day}</Text>
           </View>
         </TouchableOpacity>
       );
@@ -228,16 +333,13 @@ const RemindersScreen = () => {
     }
 
     if (week.length > 0) {
-      while (week.length < 7) {
-        week.push(<View key={`empty-end-${week.length}`} style={styles.calendarDay} />);
-      }
+      while (week.length < 7) week.push(<View key={`empty-end-${week.length}`} style={styles.calendarDay} />);
       monthGrid.push(<View key="last-week" style={styles.calendarGrid}>{week}</View>);
     }
 
     if (!isCalendarExpanded) {
       const today = new Date();
       const dateToFind = (today.getFullYear() === year && today.getMonth() === month) ? today : selectedDate;
-
       const weekIndex = Math.floor((firstDayOfMonth + dateToFind.getDate() - 1) / 7);
       return monthGrid[weekIndex] || monthGrid[0];
     }
@@ -247,17 +349,13 @@ const RemindersScreen = () => {
   return (
     <View style={styles.screenContainer}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Reminders</Text>
-        <Link href="/add-reminder" asChild>
-          <TouchableOpacity>
-            <Ionicons
-              name="add-circle-outline"
-              size={30}
-              color={COLORS.primaryBlue}
-            />
-          </TouchableOpacity>
-        </Link>
-      </View>
+  <Text style={styles.headerTitle}>Reminders</Text>
+  <TouchableOpacity
+    onPress={() => navigation.navigate('add-reminder')}
+  >
+    <Ionicons name="add-circle" size={32} color={COLORS.primaryBlue} />
+  </TouchableOpacity>
+     </View>
 
       <View style={styles.calendarContainer}>
         <View style={styles.calendarHeader}>
@@ -275,47 +373,27 @@ const RemindersScreen = () => {
         </View>
         <View style={styles.calendarWeekdays}>
           {WEEK_DAYS.map(day => (
-            <Text key={day} style={styles.calendarWeekday}>
-              {day}
-            </Text>
+            <Text key={day} style={styles.calendarWeekday}>{day}</Text>
           ))}
         </View>
-        {renderCalendar()}
+        <View style={{ overflow: 'hidden' }}>{renderCalendar()}</View>
       </View>
 
       <Text style={styles.tasksHeader}>
         Tasks for {selectedDate.toLocaleString('default', { month: 'short', day: 'numeric' })}
       </Text>
       <ScrollView>
-        <TaskItem
-          icon="pill"
-          title="Heart Medication"
-          time="10:00 AM"
-          status="Completed"
-          statusColor={COLORS.green}
-        />
+        <TaskItem icon="pill" title="Heart Medication" time="10:00 AM" status="Completed" statusColor={COLORS.green} />
         <View style={styles.divider} />
-        <TaskItem
-          icon="food-apple-outline"
-          title="Lunch with Diana"
-          time="1:00 PM"
-          status="Pending"
-          statusColor={COLORS.pending}
-        />
+        <TaskItem icon="food-apple-outline" title="Lunch with Diana" time="1:00 PM" status="Pending" statusColor={COLORS.pending} />
         <View style={styles.divider} />
-        <TaskItem
-          icon="pill"
-          title="Evening Medication"
-          time="8:00 PM"
-          status="Pending"
-          statusColor={COLORS.pending}
-        />
+        <TaskItem icon="pill" title="Evening Medication" time="8:00 PM" status="Pending" statusColor={COLORS.pending} />
       </ScrollView>
     </View>
   );
 };
 
-const ElderlyAlerts = (props: any) => (
+const ElderlyAlerts = () => (
   <View style={styles.screenContainer}>
     <View style={styles.header}>
       <Text style={styles.headerTitle}>Alert</Text>
@@ -328,7 +406,7 @@ const ElderlyAlerts = (props: any) => (
   </View>
 );
 
-const CaregiverAlerts = (props: any) => (
+const CaregiverAlerts = () => (
   <View style={styles.screenContainer}>
     <View style={styles.header}>
       <Text style={styles.headerTitle}>Alerts Log</Text>
@@ -349,76 +427,47 @@ const CaregiverAlerts = (props: any) => (
   </View>
 );
 
-// --- AI Assistant Screen (MODIFIED FOR LIVE FIREBASE) ---
 const AssistantScreen = () => {
   const [messages, setMessages] = useState<IMessage[]>([]);
-  const [isTyping, setIsTyping] = useState(false); // For "AI is typing..."
+  const [isTyping, setIsTyping] = useState(false);
 
-  // Define the AI user
-  const AI_USER = {
-    _id: 2,
-    name: 'AI Assistant',
-    avatar: 'https://placehold.co/40x40/007AFF/FFFFFF?text=AI',
-  };
+  const AI_USER = { _id: 2, name: 'AI Assistant', avatar: 'https://placehold.co/40x40/007AFF/FFFFFF?text=AI' };
 
-  // Set the initial greeting message
   useEffect(() => {
-    setMessages([
-      {
-        _id: 1,
-        text: "Hello! I'm your AI Assistant. Ask me for summaries, trends, or insights.",
-        createdAt: new Date(),
-        user: AI_USER,
-      },
-    ]);
+    setMessages([{
+      _id: 1,
+      text: "Hello! I'm your AI Assistant. Ask me for summaries, trends, or insights.",
+      createdAt: new Date(),
+      user: AI_USER,
+    }]);
   }, []);
 
   const onSend = useCallback((newMessages: IMessage[] = []) => {
-    // 1. Add the user's new message to the chat
-    setMessages((previousMessages) =>
-      GiftedChat.append(previousMessages, newMessages)
-    );
-
+    setMessages(prev => GiftedChat.append(prev, newMessages));
     const userMessageText = newMessages[0].text;
-
-    // 2. Set "AI is typing..."
     setIsTyping(true);
 
-    // 3. Call your deployed Firebase Function
     getAiChatResponse({ message: userMessageText })
-      .then((result) => {
+      .then(result => {
         const botReplyText = (result.data as { reply: string }).reply;
-
-        // 4. Create the bot's reply message
         const botMessage = {
-          _id: new Date().getTime(), // Unique ID
+          _id: new Date().getTime(),
           text: botReplyText,
           createdAt: new Date(),
           user: AI_USER,
         };
-
-        // 5. Add the bot's reply to the chat
-        setMessages((previousMessages) =>
-          GiftedChat.append(previousMessages, [botMessage])
-        );
+        setMessages(prev => GiftedChat.append(prev, [botMessage]));
       })
-      .catch((error) => {
-        console.error("Error calling Firebase Function:", error);
-        // Show an error message in the chat
+      .catch(() => {
         const errorMessage = {
           _id: new Date().getTime(),
           text: 'Sorry, I couldn\'t connect. Please try again.',
           createdAt: new Date(),
           user: AI_USER,
         };
-        setMessages((previousMessages) =>
-          GiftedChat.append(previousMessages, [errorMessage])
-        );
+        setMessages(prev => GiftedChat.append(prev, [errorMessage]));
       })
-      .finally(() => {
-        // 6. Remove "AI is typing..."
-        setIsTyping(false);
-      });
+      .finally(() => setIsTyping(false));
   }, []);
 
   return (
@@ -428,453 +477,313 @@ const AssistantScreen = () => {
       </View>
       <GiftedChat
         messages={messages}
-        onSend={(msgs) => onSend(msgs)}
-        user={{ _id: 1 }} // This is the "user"
-        isTyping={isTyping} // Pass the typing state here
+        onSend={onSend}
+        user={{ _id: 1 }}
+        isTyping={isTyping}
+        placeholder="Ask me about Eleanor's care..."
       />
     </View>
   );
 };
 
-// --- Tab Navigator Setup ---
 const Tab = createBottomTabNavigator();
 
-const AppTabs = ({ userType }: { userType: string }) => {
+const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
+  const userType = userProfile.role === 'elderly' ? 'Elderly' : 'Caregiver';
+  const userName = userProfile.name || 'User';
+  const elderlyName = 'Eleanor';
+
   return (
-    <Tab.Navigator
-      screenOptions={({ route }) => ({
-        headerShown: false,
-        tabBarActiveTintColor: COLORS.primaryBlue,
-        tabBarInactiveTintColor: COLORS.gray,
-        tabBarStyle: styles.tabBar,
-        tabBarLabelStyle: styles.tabBarLabel,
-        tabBarIcon: ({ focused, color, size }) => {
-          let iconName: React.ComponentProps<typeof Ionicons>['name'] | undefined;
-          if (route.name === 'Dashboard') {
-            iconName = focused ? 'grid' : 'grid-outline';
-          } else if (route.name === 'Reminders') {
-            iconName = focused ? 'calendar' : 'calendar-outline';
-          } else if (route.name === 'Alerts') {
-            iconName = focused ? 'shield-sharp' : 'shield-outline';
-            if (userType === 'Elderly') {
-              iconName = focused ? 'alert-circle' : 'alert-circle-outline';
-            }
-          } else if (route.name === 'Assistant') {
-            iconName = focused
-              ? 'chatbubble-ellipses'
-              : 'chatbubble-ellipses-outline';
-          }
-          return <Ionicons name={iconName} size={size} color={color} />;
-        },
-      })}>
+    <Tab.Navigator screenOptions={{
+      headerShown: false,
+      tabBarActiveTintColor: COLORS.primaryBlue,
+      tabBarInactiveTintColor: COLORS.gray,
+      tabBarStyle: styles.tabBar,
+      tabBarLabelStyle: styles.tabBarLabel,
+      tabBarIcon: ({ focused, color, size }) => {
+        let iconName: any;
+        if (focused) {
+          if (userType === 'Elderly') iconName = 'alert-circle';
+          else iconName = 'shield-sharp';
+        } else {
+          if (userType === 'Elderly') iconName = 'alert-circle-outline';
+          else iconName = 'shield-outline';
+        }
+        return <Ionicons name={iconName} size={size} color={color} />;
+      },
+    }}>
       <Tab.Screen name="Dashboard">
-        {(props) =>
-          userType === 'Elderly' ? (
-            <ElderlyDashboard {...props} />
-          ) : (
-            <CaregiverDashboard {...props} />
-          )
-        }
+        {() => userType === 'Elderly' ? <ElderlyDashboard userName={userName} /> : <CaregiverDashboard elderlyName={elderlyName} />}
       </Tab.Screen>
-      <Tab.Screen name="Reminders" component={RemindersScreen} />
+      <Tab.Screen name="Reminders"
+  component={RemindersScreen}
+  options={{
+    tabBarLabel: 'Reminders',
+    tabBarIcon: ({ color, size }) => (
+      <Ionicons name="calendar-outline" size={size} color={color} />
+    ),
+    headerRight: () => (
+      <TouchableOpacity
+        style={{ marginRight: 15 }}
+        onPress={() => router.push('/add-reminder')} // This opens your screen
+      >
+        <Ionicons name="add-circle-outline" size={30} color={COLORS.primaryBlue} />
+      </TouchableOpacity>
+    ),
+  }}
+/>
       <Tab.Screen name="Alerts">
-        {(props) =>
-          userType === 'Elderly' ? (
-            <ElderlyAlerts {...props} />
-          ) : (
-            <CaregiverAlerts {...props} />
-          )
-        }
+        {() => userType === 'Elderly' ? <ElderlyAlerts /> : <CaregiverAlerts />}
       </Tab.Screen>
       <Tab.Screen name="Assistant" component={AssistantScreen} />
     </Tab.Navigator>
   );
 };
 
-// --- Main App Component ---
+// Main App
 export default function TabsScreen() {
-  const [userType, setUserType] = useState('Elderly');
+  const [user, setUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const toggleUserType = () => {
-    setUserType((prev) => (prev === 'Elderly' ? 'Caregiver' : 'Elderly'));
-  };
+  useEffect(() => {
+    console.log("Auth state listener is open"); 
+
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      console.log("Auth changed:", currentUser?.email || "No user");
+
+      if (currentUser) {
+        setUser(currentUser);
+        try {
+          const profileRef = doc(db, 'users', currentUser.uid);
+          const profileSnap = await getDoc(profileRef);
+
+          if (profileSnap.exists()) {
+            const data = profileSnap.data() as UserProfile;
+            console.log("Get profile:", data.name, data.role);
+            setUserProfile(data);
+          } else {
+            console.log("no profile,log out");
+            await signOut(auth); 
+          }
+        } catch (err) {
+          console.error("Profile loading problem:", err);
+          Alert.alert("Error", "Failed to load profile");
+        }
+      } else {
+        setUser(null);
+        setUserProfile(null);
+      }
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  
+  if (loading) {
+    return (
+      <SafeAreaView style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#fff' }}>
+        <ActivityIndicator size="large" color={COLORS.primaryBlue} />
+        <Text style={{ marginTop: 20, fontSize: 18 }}>Loading your app...</Text>
+      </SafeAreaView>
+    );
+  }
+
+  if (!user || !userProfile) {
+    return <AuthScreen onSuccess={() => {}} />; 
+  }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
       <StatusBar barStyle="dark-content" />
       <View style={styles.toggleContainer}>
-        <Text style={styles.toggleLabel}>Viewing as: </Text>
-        <TouchableOpacity onPress={toggleUserType} style={styles.toggleButton}>
-          <Text style={styles.toggleButtonText}>{userType}</Text>
+        <Text style={styles.toggleLabel}>
+          Logged in as: {userProfile.name} ({userProfile.role.toUpperCase()})
+        </Text>
+        <TouchableOpacity onPress={() => signOut(auth)}>
+          <Text style={{ color: COLORS.red, fontWeight: 'bold' }}>Sign Out</Text>
         </TouchableOpacity>
       </View>
-      <AppTabs userType={userType} />
+      <AppTabs userProfile={userProfile} />
     </SafeAreaView>
+  
   );
 }
 
-// --- Styles ---
+//  styles
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: COLORS.white,
+ authContainer: { 
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center', 
+    padding: 30 
   },
-  screenContainer: {
-    flex: 1,
-    backgroundColor: COLORS.white,
+
+  authFormWrapper: {
+    width: '100%',
+    maxWidth: 380,        
+    alignItems: 'center', 
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 15,
+
+  input: { 
+    width: 320,           
+    backgroundColor: '#f5f5f5', 
+    padding: 16,
+    borderRadius: 12, 
+    marginBottom: 15, 
+    fontSize: 16,
+    alignSelf: 'center',  
   },
-  headerTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: COLORS.black,
+
+  
+  authButton: { 
+    backgroundColor: COLORS.primaryBlue, 
+    padding: 16,
+    borderRadius: 12, 
+    width: 320,           
+    alignItems: 'center', 
+    marginTop: 10 
   },
-  card: {
-    backgroundColor: COLORS.lightGray,
+
+  roleContainer: { 
+    width: '100%', 
+    maxWidth: 340,
+    marginVertical: 15 
+  },
+  roleLabel: { fontSize: 16, 
+    marginBottom: 10, 
+    color: COLORS.gray },
+  roleBtn: { padding: 14, 
+    borderRadius: 12,
+     backgroundColor: '#f0f0f0', 
+     width: '45%', 
+     alignItems: 'center' },
+  roleActive: { backgroundColor: COLORS.primaryBlue },
+  roleText: { fontSize: 16 },
+  roleTextActive: { color: '#fff', 
+    fontWeight: 'bold' },
+  toggleContainer: { flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    padding: 15, 
+    backgroundColor: COLORS.lightGray, 
+    borderBottomWidth: 1, 
+    borderColor: COLORS.divider },
+
+  toggleLabel: { fontSize: 14, color: COLORS.gray },
+
+  safeArea: { flex: 1, backgroundColor: COLORS.white },
+  screenContainer: { flex: 1, backgroundColor: COLORS.white },
+  header: { flexDirection: 'row', 
+    justifyContent: 'space-between', 
+    alignItems: 'center', 
+    paddingHorizontal: 20, 
+    paddingVertical: 15 },
+  headerTitle: { fontSize: 28, 
+  fontWeight: 'bold',
+   color: COLORS.black },
+  card: { backgroundColor: COLORS.lightGray, 
     borderRadius: 15,
-    padding: 20,
-    marginHorizontal: 20,
-    marginTop: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  cardTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 15,
-  },
-  cardSubtitle: {
-    fontSize: 14,
-    color: COLORS.gray,
-    marginBottom: 15,
-  },
-  // Dashboard - Elderly
-  goalItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  goalText: {
-    marginLeft: 15,
-    flex: 1,
-  },
-  goalTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  goalSubtitle: {
-    fontSize: 14,
-    color: COLORS.gray,
-  },
-  progressBarContainer: {
-    height: 8,
+     padding: 20,
+      marginHorizontal: 20, 
+      marginTop: 20,
+     shadowColor: '#000',
+     shadowOffset: { width: 0, height: 2 }, 
+     shadowOpacity: 0.05, 
+     shadowRadius: 4, 
+     elevation: 2 },
+  cardTitle: { fontSize: 18, 
+    fontWeight: 'bold', 
+    marginBottom: 15 },
+  cardSubtitle: { fontSize: 14, color: COLORS.gray, marginBottom: 15 },
+  goalItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  goalText: { marginLeft: 15, flex: 1 },
+  goalTitle: { fontSize: 16, fontWeight: '600' },
+  goalSubtitle: { fontSize: 14, color: COLORS.gray },
+  progressBarContainer: { height: 8, 
     backgroundColor: COLORS.divider,
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 15,
-  },
-  progressBar: {
-    height: '100%',
-    backgroundColor: COLORS.primaryBlue,
-    borderRadius: 4,
-  },
-  nextReminderCard: {
-    backgroundColor: COLORS.darkBlue,
-  },
-  reminderItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  reminderText: {
-    marginLeft: 15,
-  },
-  reminderTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: COLORS.white,
-  },
-  reminderTime: {
-    fontSize: 16,
-    color: COLORS.lightBlue,
-  },
-  // Dashboard - Caregiver
-  statusContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-  },
-  statusBox: {
-    alignItems: 'center',
-  },
-  statusValue: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: COLORS.primaryBlue,
-  },
-  statusLabel: {
-    fontSize: 14,
-    color: COLORS.gray,
-  },
-  statusDivider: {
-    width: 1,
-    height: '60%',
-    backgroundColor: COLORS.divider,
-  },
-  allWellBadge: {
-    position: 'absolute',
-    top: -35,
-    right: -10,
-    backgroundColor: COLORS.lightBlue,
-    borderColor: COLORS.green,
-    borderWidth: 1,
+     borderRadius: 4,
+      overflow: 'hidden',
+       marginBottom: 15 },
+  progressBar: { height: '100%', backgroundColor: COLORS.primaryBlue, borderRadius: 4 },
+  nextReminderCard: { backgroundColor: COLORS.darkBlue },
+  reminderItem: { flexDirection: 'row', alignItems: 'center' },
+  reminderText: { marginLeft: 15 },
+  reminderTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.white },
+  reminderTime: { fontSize: 16, color: COLORS.lightBlue },
+  statusContainer: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
+  statusBox: { alignItems: 'center' },
+  statusValue: { fontSize: 24, fontWeight: 'bold', color: COLORS.primaryBlue },
+  statusLabel: { fontSize: 14, color: COLORS.gray },
+  statusDivider: { width: 1, height: '60%', backgroundColor: COLORS.divider },
+  allWellBadge: { position: 'absolute', 
+    top: -35, 
+    right: -10, 
+    backgroundColor: COLORS.lightBlue, 
+    borderColor: COLORS.green, 
+    borderWidth: 1, 
+    borderRadius: 15, 
+    paddingVertical: 4, 
+    paddingHorizontal: 10 },
+  allWellText: { color: COLORS.green, fontWeight: '600' },
+  taskItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 20 },
+  taskIconContainer: { width: 40, 
+    height: 40, 
+    borderRadius: 20, 
+    backgroundColor: COLORS.lightBlue, 
+    justifyContent: 'center', 
+    alignItems: 'center' },
+  taskTextContainer: { flex: 1, marginLeft: 15 },
+  taskTitle: { fontSize: 16, fontWeight: '600' },
+  taskTime: { fontSize: 14, color: COLORS.gray },
+  taskStatus: { fontSize: 14, fontWeight: '600' },
+  divider: { height: 1, backgroundColor: COLORS.divider, marginVertical: 5, marginHorizontal: 20 },
+  calendarContainer: { marginHorizontal: 20, 
     borderRadius: 15,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-  },
-  allWellText: {
-    color: COLORS.green,
-    fontWeight: '600',
-  },
-  // Shared Task Item
-  taskItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 20,
-  },
-  taskIconContainer: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: COLORS.lightBlue,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  taskTextContainer: {
-    flex: 1,
-    marginLeft: 15,
-  },
-  taskTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  taskTime: {
-    fontSize: 14,
-    color: COLORS.gray,
-  },
-  taskStatus: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: COLORS.divider,
-    marginVertical: 5,
-    marginHorizontal: 20,
-  },
-  // Reminders Screen
-  calendarContainer: {
-    marginHorizontal: 20,
-    borderRadius: 15,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: COLORS.divider,
-    padding: 10,
-  },
-  calendarHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  calendarMonthYear: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: COLORS.black,
-  },
-  calendarWeekdays: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 5,
-  },
-  calendarWeekday: {
-    width: 40,
-    textAlign: 'center',
-    color: COLORS.gray,
-    fontWeight: '600',
-  },
-  calendarGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-  },
-  calendarDay: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  dayTextContainer: {
-    width: 32,
-    height: 32,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: 16,
-  },
-  calendarDayText: {
-    fontSize: 16,
-    color: COLORS.black,
-  },
-  selectedDay: {
-    backgroundColor: COLORS.primaryBlue,
-    borderRadius: 20,
-  },
-  selectedDayText: {
-    fontSize: 16,
-    color: COLORS.white,
-    fontWeight: 'bold',
-  },
-  tasksHeader: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    margin: 20,
-  },
-  // Alerts - Elderly
-  sosContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  sosButton: {
-    width: width * 0.6,
-    height: width * 0.6,
-    borderRadius: width * 0.3,
-    backgroundColor: COLORS.sosRed,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: COLORS.red,
+     overflow: 'hidden', 
+    borderWidth: 1, 
+    borderColor: COLORS.divider, 
+    padding: 10 },
+  calendarHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  calendarMonthYear: { fontSize: 18, fontWeight: 'bold', color: COLORS.black },
+  calendarWeekdays: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 5 },
+  calendarWeekday: { width: 40, textAlign: 'center', color: COLORS.gray, fontWeight: '600' },
+  calendarGrid: { flexDirection: 'row', justifyContent: 'space-around' },
+  calendarDay: { width: 40, height: 40, justifyContent: 'center', alignItems: 'center' },
+  dayTextContainer: { width: 32, height: 32, justifyContent: 'center', alignItems: 'center', borderRadius: 16 },
+  calendarDayText: { fontSize: 16, color: COLORS.black },
+  selectedDay: { backgroundColor: COLORS.primaryBlue },
+  selectedDayText: { fontSize: 16, color: COLORS.white, fontWeight: 'bold' },
+  tasksHeader: { fontSize: 18, fontWeight: 'bold', margin: 20 },
+  sosContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  sosButton: { width: width * 0.6, 
+    height: width * 0.6, 
+    borderRadius: width * 0.3, 
+    backgroundColor: COLORS.sosRed, 
+    justifyContent: 'center', 
+    alignItems: 'center', 
+    shadowColor: COLORS.red, 
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    elevation: 8,
-  },
-  sosText: {
-    fontSize: 60,
-    fontWeight: 'bold',
-    color: COLORS.white,
-  },
-  // Alerts - Caregiver
-  alertLogContainer: {
-    padding: 20,
-  },
-  alertCard: {
-    backgroundColor: COLORS.alertBg,
-    borderRadius: 15,
-    padding: 20,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    borderWidth: 1,
-    borderColor: COLORS.red,
-  },
-  alertTextContainer: {
-    marginLeft: 15,
-    flex: 1,
-  },
-  alertTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: COLORS.red,
-  },
-  alertTime: {
-    fontSize: 14,
-    color: COLORS.black,
-    marginVertical: 4,
-  },
-  locationContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 5,
-  },
-  alertLocation: {
-    fontSize: 14,
-    color: COLORS.gray,
-    marginLeft: 5,
-  },
-  // AI Assistant
-  chatInputContainer: {
-    borderTopWidth: 1,
-    borderTopColor: COLORS.divider,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    backgroundColor: COLORS.white,
-  },
-  chatTextInput: {
-    backgroundColor: COLORS.lightGray,
-    borderRadius: 20,
-    paddingHorizontal: 15,
-    paddingVertical: 10,
-    marginLeft: 0,
-    fontSize: 16,
-  },
-  sendButtonContainer: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 10,
-    marginRight: 5,
-  },
-  chatActionsButton: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 5,
-    marginRight: 10,
-  },
-  micButton: {
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  // Tab Bar
-  tabBar: {
-    height: 90,
+     shadowOpacity: 0.3, 
+     shadowRadius: 10, 
+     elevation: 8 },
+  sosText: { fontSize: 60, fontWeight: 'bold', color: COLORS.white },
+  alertLogContainer: { padding: 20 },
+  alertCard: { backgroundColor: COLORS.alertBg,
+     borderRadius: 15, padding: 20, 
+     flexDirection: 'row', 
+     alignItems: 'flex-start', 
+     borderWidth: 1, borderColor: COLORS.red },
+  alertTextContainer: { marginLeft: 15, flex: 1 },
+  alertTitle: { fontSize: 16, fontWeight: 'bold', color: COLORS.red },
+  alertTime: { fontSize: 14, color: COLORS.black, marginVertical: 4 },
+  locationContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
+  alertLocation: { fontSize: 14, color: COLORS.gray, marginLeft: 5 },
+  tabBar: { height: 90, 
     paddingTop: 10,
-    paddingBottom: 30,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.divider,
-    backgroundColor: COLORS.white,
-  },
-  tabBarLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  // Demo Toggle
-  toggleContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 10,
-    backgroundColor: COLORS.lightGray,
-  },
-  toggleLabel: {
-    fontSize: 16,
-    color: COLORS.gray,
-  },
-  toggleButton: {
-    backgroundColor: COLORS.primaryBlue,
-    paddingVertical: 5,
-    paddingHorizontal: 10,
-    borderRadius: 15,
-  },
-  toggleButtonText: {
-    color: COLORS.white,
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
+     paddingBottom: 30, 
+     borderTopWidth: 1, 
+     borderTopColor: COLORS.divider, 
+     backgroundColor: COLORS.white },
+  tabBarLabel: { fontSize: 12, fontWeight: '600' },
 });

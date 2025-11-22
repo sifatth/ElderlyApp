@@ -1,8 +1,9 @@
 import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 import { getFunctions, httpsCallable } from "firebase/functions";
 
-// web app's Firebase configuration
+// Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCgzUcHVCNWFNsFdh8iSq18M9Hvkj4o40g",
   authDomain: "elderlyapp-dabda.firebaseapp.com",
@@ -18,7 +19,10 @@ const app = initializeApp(firebaseConfig);
 
 // --- AI Chatbot ---
 const functions = getFunctions(app);
-export const getAiChatResponse = httpsCallable(functions, 'getAiChatResponse');
+export const getAiChatResponse = httpsCallable(functions, "getAiChatResponse");
 
-// Initialize and export the Firestore database
+// --- Firestore ---
 export const db = getFirestore(app);
+
+// --- Authentication ( Required for login/signup/role management) ---
+export const auth = getAuth(app);   
