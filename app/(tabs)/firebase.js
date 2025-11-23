@@ -17,12 +17,12 @@ const firebaseConfig = {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// --- AI Chatbot ---
+// AI Chatbot
 const functions = getFunctions(app);
 export const getAiChatResponse = httpsCallable(functions, "getAiChatResponse");
 
-// --- Firestore ---
+// Firestore
 export const db = getFirestore(app);
 
-// --- Authentication ( Required for login/signup/role management) ---
+// Authentication
 export const auth = getAuth(app);   
