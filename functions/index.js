@@ -13,7 +13,7 @@ exports.getAiChatResponse = onCall({ secrets: ["OPENAI_API_KEY"] }, async (reque
     throw new HttpsError("invalid-argument", "The function must be called with one argument 'message' that is a string.");
   }
 
-  // USING 2.5 FLASH
+  // Using gemini-2.5-flash model
   const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
 
   const requestPayload = {
