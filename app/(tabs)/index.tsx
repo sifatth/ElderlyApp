@@ -1,6 +1,7 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -16,25 +17,26 @@ import {
   TextInput,
   TouchableOpacity,
   UIManager,
-  View,
+  View
 } from 'react-native';
 import { GiftedChat, IMessage } from 'react-native-gifted-chat';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
-// Firebase
-import { getApp, initializeApp } from 'firebase/app';
-import {
-  createUserWithEmailAndPassword,
-  getAuth,
-  onAuthStateChanged,
-  signInWithEmailAndPassword,
-  signOut,
-  User,
-} from 'firebase/auth';
-import { doc, getDoc, getFirestore, setDoc } from 'firebase/firestore';
+import { auth, db } from './firebase.js';
 
 // --- Firebase & AI ---
 import { getAiChatResponse } from './firebase.js';
+
+// Firebase
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  User
+} from 'firebase/auth';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+
+
 
 // Canvas variables
 declare const __app_id: string;
@@ -42,21 +44,7 @@ declare const __firebase_config: string;
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-// Safe Firebase init 
-let auth: any;
-let db: any;
-try {
-  const app = getApp();
-  auth = getAuth(app);
-  db = getFirestore(app);
-} catch (e: any) {
-  if (e.code === 'app/no-app') {
-    const config = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-    const app = initializeApp(config);
-    auth = getAuth(app);
-    db = getFirestore(app);
-  }
-}
+
 
 type UserRole = 'elderly' | 'caregiver';
 type UserProfile = {
@@ -251,12 +239,70 @@ const ElderlyDashboard = ({ userName }: { userName: string }) => (
   </ScrollView>
 );
 
-const CaregiverDashboard = ({ elderlyName }: { elderlyName: string }) => (
-  <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
-    <View style={styles.header}>
-      <Text style={styles.headerTitle}>{elderlyName}'s Dashboard</Text>
-    </View>
-    <Card>
+
+const CaregiverDashboard = ({ userProfile, elderlyProfile }: { 
+  userProfile: UserProfile, 
+  elderlyProfile: UserProfile | null 
+}) => {
+  const router = useRouter();
+
+  const isLinked = !!userProfile.linkedElderlyId;
+  const elderlyName = elderlyProfile ? elderlyProfile.name : "No Elderly Linked";
+
+  // If linked but profile hasn't loaded (i.e., we are in the "Connecting..." state)
+  if (isLinked && !elderlyProfile) {
+    return (
+      <View style={styles.screenContainer}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Loading Elderly Dashboard...</Text>
+        </View>
+        <ActivityIndicator size="large" color={COLORS.primaryBlue} style={{ marginTop: 50 }} />
+      </View>
+    );
+  };
+
+  return (
+    <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>{elderlyName}'s Dashboard</Text>
+      </View>
+
+      {elderlyName === "No Elderly Linked" || elderlyName.includes("Link") ? (
+        <TouchableOpacity
+          style={{
+            backgroundColor: COLORS.lightBlue,
+            margin: 20,
+            padding: 20,
+            borderRadius: 15,
+            alignItems: 'center',
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 2 },
+            shadowOpacity: 0.1,
+            shadowRadius: 5,
+            elevation: 5,
+          }}
+          onPress={() => router.push('/link-elderly')}
+        >
+          <Ionicons name="link-outline" size={40} color={COLORS.primaryBlue} />
+          <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 18, marginTop: 10 }}>
+            Link to an Elderly User
+          </Text>
+          <Text style={{ color: COLORS.gray, fontSize: 14, marginTop: 5 }}>
+            Tap here to connect with someone you care for
+          </Text>
+        </TouchableOpacity>
+      ) : (
+        <TouchableOpacity
+          style={{ alignSelf: 'center', margin: 15, padding: 10 }}
+          onPress={() => router.push('/link-elderly')}
+        >
+          <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 15 }}>
+            Change Linked Elderly
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      <Card>
       <Text style={styles.cardTitle}>Today's Status</Text>
       <Text style={styles.cardSubtitle}>Last updated: 9:00 AM</Text>
       <View style={styles.statusContainer}>
@@ -284,7 +330,7 @@ const CaregiverDashboard = ({ elderlyName }: { elderlyName: string }) => (
     </Card>
   </ScrollView>
 );
-
+};
 const RemindersScreen = () => {
   const navigation = useNavigation();
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -489,32 +535,54 @@ const AssistantScreen = () => {
 const Tab = createBottomTabNavigator();
 
 const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
-  const userType = userProfile.role === 'elderly' ? 'Elderly' : 'Caregiver';
-  const userName = userProfile.name || 'User';
-  const elderlyName = 'Eleanor';
+  const [elderlyProfile, setElderlyProfile] = useState<UserProfile | null>(null);
+
+  useEffect(() => {
+    if (userProfile.role === 'caregiver' && userProfile.linkedElderlyId) {
+      const elderlyRef = doc(db, 'users', userProfile.linkedElderlyId);
+      
+      // onSnapshot: Linked Elderly 
+      const unsubscribe = onSnapshot(elderlyRef, (docSnap) => {
+        if (docSnap.exists()) {
+          setElderlyProfile(docSnap.data() as UserProfile);
+        } else {
+          setElderlyProfile(null); 
+        }
+      }, (error) => {
+        console.error("Error fetching elderly profile:", error);
+        setElderlyProfile(null);
+      });
+      
+      return () => unsubscribe(); 
+    } else {
+      setElderlyProfile(null); 
+    }
+  }, [userProfile.role, userProfile.linkedElderlyId]); 
+
+  const displayName = userProfile.role === 'elderly'
+    ? userProfile.name
+    : (elderlyProfile?.name || "No Elderly Linked");
 
   return (
-    <Tab.Navigator screenOptions={{
-      headerShown: false,
-      tabBarActiveTintColor: COLORS.primaryBlue,
-      tabBarInactiveTintColor: COLORS.gray,
-      tabBarStyle: styles.tabBar,
-      tabBarLabelStyle: styles.tabBarLabel,
-      tabBarIcon: ({ focused, color, size }) => {
-        let iconName: any;
-        if (focused) {
-          if (userType === 'Elderly') iconName = 'alert-circle';
-          else iconName = 'shield-sharp';
-        } else {
-          if (userType === 'Elderly') iconName = 'alert-circle-outline';
-          else iconName = 'shield-outline';
-        }
-        return <Ionicons name={iconName} size={size} color={color} />;
-      },
-    }}>
+    <Tab.Navigator
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: COLORS.primaryBlue,
+        tabBarInactiveTintColor: COLORS.gray,
+        tabBarStyle: styles.tabBar,
+        tabBarLabelStyle: styles.tabBarLabel,
+      }}
+    >
       <Tab.Screen name="Dashboard">
-        {() => userType === 'Elderly' ? <ElderlyDashboard userName={userName} /> : <CaregiverDashboard elderlyName={elderlyName} />}
+        {() => 
+          userProfile.role === 'elderly' 
+            ? <ElderlyDashboard userName={userProfile.name} />
+            : <CaregiverDashboard userProfile={userProfile}       
+                elderlyProfile={elderlyProfile}
+                />
+        }
       </Tab.Screen>
+
       <Tab.Screen name="Reminders"
   component={RemindersScreen}
   options={{
@@ -523,17 +591,17 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
       <Ionicons name="calendar-outline" size={size} color={color} />
     ),
     headerRight: () => (
-      <TouchableOpacity
-        style={{ marginRight: 15 }}
-        onPress={() => router.push('/add-reminder')} // This opens your screen
-      >
-        <Ionicons name="add-circle-outline" size={30} color={COLORS.primaryBlue} />
-      </TouchableOpacity>
-    ),
+  <TouchableOpacity
+    style={{ marginRight: 15 }}
+    onPress={() => alert('Add reminder')} 
+  >
+    <Ionicons name="add-circle-outline" size={30} color={COLORS.primaryBlue} />
+  </TouchableOpacity>
+)
   }}
 />
       <Tab.Screen name="Alerts">
-        {() => userType === 'Elderly' ? <ElderlyAlerts /> : <CaregiverAlerts />}
+       {() => userProfile.role === 'elderly' ? <ElderlyAlerts /> : <CaregiverAlerts />}
       </Tab.Screen>
       <Tab.Screen name="Assistant" component={AssistantScreen} />
     </Tab.Navigator>
@@ -545,40 +613,61 @@ export default function TabsScreen() {
   const [user, setUser] = useState<User | null>(null);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  
+  const navigation = useNavigation();
 
-  useEffect(() => {
+  // Function to fetch the user profile (used in useEffect and onFocus)
+  const fetchUserProfile = useCallback((currentUser: User) => {
+    const profileRef = doc(db, 'users', currentUser.uid);
+    
+    // onSnapshot: Real-time listener
+    const unsubscribe = onSnapshot(profileRef, (profileSnap) => {
+      if (profileSnap.exists()) {
+        const data = profileSnap.data() as UserProfile;
+        setUserProfile(data);
+        setLoading(false); // Set loading to false once profile is loaded
+      } else {
+        console.log("No profile found for user, attempting sign out.");
+        setUserProfile(null);
+        signOut(auth);
+        setLoading(false);
+      }
+    }, (error) => {
+      console.error("Profile real-time loading problem:", error);
+      Alert.alert("Error", "Failed to load profile in real-time.");
+      setLoading(false);
+    });
+    
+    return unsubscribe; // Returns the unsubscribe function
+  }, []);
+
+ useEffect(() => {
     console.log("Auth state listener is open"); 
+    let profileUnsubscribe: (() => void) | undefined; // to store the profile listener
 
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const authUnsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       console.log("Auth changed:", currentUser?.email || "No user");
+
+      // Clean up previous profile listener if any
+      if (profileUnsubscribe) profileUnsubscribe();
 
       if (currentUser) {
         setUser(currentUser);
-        try {
-          const profileRef = doc(db, 'users', currentUser.uid);
-          const profileSnap = await getDoc(profileRef);
-
-          if (profileSnap.exists()) {
-            const data = profileSnap.data() as UserProfile;
-            console.log("Get profile:", data.name, data.role);
-            setUserProfile(data);
-          } else {
-            console.log("no profile,log out");
-            await signOut(auth); 
-          }
-        } catch (err) {
-          console.error("Profile loading problem:", err);
-          Alert.alert("Error", "Failed to load profile");
-        }
+        // Start listening for profile changes in real-time
+        profileUnsubscribe = fetchUserProfile(currentUser); 
+        
       } else {
         setUser(null);
         setUserProfile(null);
+        setLoading(false);
       }
-      setLoading(false);
     });
 
-    return () => unsubscribe();
-  }, []);
+    return () => {
+        authUnsubscribe(); // Unsubscribe from auth
+        if (profileUnsubscribe) profileUnsubscribe(); // Unsubscribe from profile
+    };
+  }, [fetchUserProfile]); // Add dependency
 
   
   if (loading) {
@@ -786,4 +875,21 @@ const styles = StyleSheet.create({
      borderTopColor: COLORS.divider, 
      backgroundColor: COLORS.white },
   tabBarLabel: { fontSize: 12, fontWeight: '600' },
+
+  shareButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.green, 
+    padding: 14,
+    borderRadius: 12,
+    marginTop: 20,
+    marginHorizontal: 10,
+  },
+  shareButtonText: {
+    color: COLORS.white,
+    fontSize: 17,
+    fontWeight: 'bold',
+    marginLeft: 10,
+  },
 });
