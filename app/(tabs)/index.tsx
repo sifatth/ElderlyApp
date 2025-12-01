@@ -1,6 +1,6 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
@@ -35,7 +35,7 @@ import {
   signOut,
   User
 } from 'firebase/auth';
-import { addDoc, collection, doc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore';
 
 // Canvas variables
 declare const __app_id: string;
@@ -394,6 +394,93 @@ const RemindersScreen = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [isCalendarExpanded, setCalendarExpanded] = useState(false);
+  const [reminders, setReminders] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Load reminders when screen comes into focus
+  useFocusEffect(
+    useCallback(() => {
+      loadReminders();
+    }, [])
+  );
+
+  const loadReminders = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
+
+      // Load current user's reminders
+      const remindersRef = collection(db, 'users', currentUser.uid, 'reminders');
+      const q = query(remindersRef, orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+
+      let loadedReminders = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      // Check if user has a linked partner
+      const userProfileRef = doc(db, 'users', currentUser.uid);
+      const userProfileSnap = await getDoc(userProfileRef);
+      
+      if (userProfileSnap.exists()) {
+        const userProfile = userProfileSnap.data();
+        const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+        
+        if (linkedUserId) {
+          // Load linked partner's reminders
+          const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+          const linkedQ = query(linkedRemindersRef, orderBy('createdAt', 'desc'));
+          const linkedSnapshot = await getDocs(linkedQ);
+          
+          const linkedReminders = linkedSnapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+          }));
+          
+          // Combine reminders and remove duplicates based on createdBy and title
+          const reminderMap = new Map();
+          [...loadedReminders, ...linkedReminders].forEach(reminder => {
+            const key = `${reminder.createdBy}_${reminder.title}_${reminder.date}`;
+            if (!reminderMap.has(key)) {
+              reminderMap.set(key, reminder);
+            }
+          });
+          
+          loadedReminders = Array.from(reminderMap.values())
+            .sort((a, b) => {
+              const aTime = a.createdAt?.toMillis?.() || 0;
+              const bTime = b.createdAt?.toMillis?.() || 0;
+              return bTime - aTime;
+            });
+        }
+      }
+
+      setReminders(loadedReminders);
+      setLoading(false);
+    } catch (error) {
+      console.error('Error loading reminders:', error);
+      setLoading(false);
+    }
+  };
+
+  const getRemindersForDate = (date: Date) => {
+    return reminders.filter(reminder => {
+      if (reminder.repeatOption === 'Daily') {
+        return true;
+      } else if (reminder.repeatOption === 'Weekly') {
+        const dayName = WEEK_DAYS[date.getDay()];
+        return reminder.selectedDays?.includes(dayName);
+      } else if (reminder.repeatOption === 'Once') {
+        const reminderDate = new Date(reminder.date);
+        return reminderDate.toDateString() === date.toDateString();
+      }
+      return false;
+    });
+  };
 
   const changeMonth = (increment: number) => {
     const newDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + increment, 1);
@@ -487,11 +574,28 @@ const RemindersScreen = () => {
         Tasks for {selectedDate.toLocaleString('default', { month: 'short', day: 'numeric' })}
       </Text>
       <ScrollView>
-        <TaskItem icon="pill" title="Heart Medication" time="10:00 AM" status="Completed" statusColor={COLORS.green} />
-        <View style={styles.divider} />
-        <TaskItem icon="food-apple-outline" title="Lunch with Diana" time="1:00 PM" status="Pending" statusColor={COLORS.pending} />
-        <View style={styles.divider} />
-        <TaskItem icon="pill" title="Evening Medication" time="8:00 PM" status="Pending" statusColor={COLORS.pending} />
+        {loading ? (
+          <View style={{ padding: 20, alignItems: 'center' }}>
+            <ActivityIndicator size="large" color={COLORS.primaryBlue} />
+          </View>
+        ) : getRemindersForDate(selectedDate).length === 0 ? (
+          <View style={{ padding: 20, alignItems: 'center' }}>
+            <Text style={{ color: COLORS.gray, fontSize: 16 }}>No reminders for this day</Text>
+          </View>
+        ) : (
+          getRemindersForDate(selectedDate).map((reminder, index) => (
+            <View key={reminder.id}>
+              <TaskItem 
+                icon={reminder.title.toLowerCase().includes('medic') ? 'pill' : 'calendar-outline'} 
+                title={reminder.title} 
+                time={reminder.time || '10:00 AM'} 
+                status={reminder.status || 'Pending'} 
+                statusColor={reminder.status === 'Completed' ? COLORS.green : COLORS.pending}
+              />
+              {index < getRemindersForDate(selectedDate).length - 1 && <View style={styles.divider} />}
+            </View>
+          ))
+        )}
       </ScrollView>
     </View>
   );

@@ -1,16 +1,19 @@
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { Stack, useRouter } from 'expo-router';
+import { addDoc, collection, doc, getDoc, serverTimestamp } from 'firebase/firestore';
 import React, { useState } from 'react';
 import {
-  Platform,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    Alert,
+    Platform,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View
 } from 'react-native';
+import { auth, db } from './(tabs)/firebase';
 
 const COLORS = {
   primaryBlue: '#007AFF',
@@ -32,17 +35,42 @@ const AddReminderScreen = () => {
   const [date, setDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [showTimePicker, setShowTimePicker] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const onDateChange = (event: any, selectedDate: Date | undefined) => {
-    const currentDate = selectedDate || date;
-    setShowDatePicker(Platform.OS === 'ios');
-    setDate(currentDate);
+    if (Platform.OS === 'android') {
+      setShowDatePicker(false);
+    }
+    
+    if (event.type === 'dismissed' || !selectedDate) {
+      setShowDatePicker(false);
+      return;
+    }
+    
+    // Preserve the time component from current date
+    const newDate = new Date(selectedDate);
+    newDate.setHours(date.getHours());
+    newDate.setMinutes(date.getMinutes());
+    newDate.setSeconds(date.getSeconds());
+    setDate(newDate);
   };
 
   const onTimeChange = (event: any, selectedTime: Date | undefined) => {
-    const currentTime = selectedTime || date;
-    setShowTimePicker(Platform.OS === 'ios');
-    setDate(currentTime);
+    if (Platform.OS === 'android') {
+      setShowTimePicker(false);
+    }
+    
+    if (event.type === 'dismissed' || !selectedTime) {
+      setShowTimePicker(false);
+      return;
+    }
+    
+    // Preserve the date component from current date
+    const newDate = new Date(date);
+    newDate.setHours(selectedTime.getHours());
+    newDate.setMinutes(selectedTime.getMinutes());
+    newDate.setSeconds(selectedTime.getSeconds());
+    setDate(newDate);
   };
 
   const toggleDay = (day: string) => {
@@ -51,10 +79,66 @@ const AddReminderScreen = () => {
     );
   };
 
-  const handleSave = () => {
-    // Logic to save the reminder
-    console.log('Reminder Saved:', { title, repeatOption, selectedDays, date });
-    router.back();
+  const handleSave = async () => {
+    if (!title.trim()) {
+      Alert.alert('Error', 'Please enter a reminder title');
+      return;
+    }
+
+    if (repeatOption === 'Weekly' && selectedDays.length === 0) {
+      Alert.alert('Error', 'Please select at least one day');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        Alert.alert('Error', 'You must be logged in');
+        return;
+      }
+
+      // Fetch current user's profile to check for linked partner
+      const userProfileRef = doc(db, 'users', currentUser.uid);
+      const userProfileSnap = await getDoc(userProfileRef);
+      
+      const reminderData = {
+        title: title.trim(),
+        repeatOption,
+        selectedDays: repeatOption === 'Weekly' ? selectedDays : [],
+        date: date.toISOString(),
+        time: date.toTimeString().split(' ')[0],
+        status: 'Pending',
+        createdBy: currentUser.uid,
+        createdAt: serverTimestamp(),
+      };
+
+      // Save to current user's reminders
+      const remindersRef = collection(db, 'users', currentUser.uid, 'reminders');
+      await addDoc(remindersRef, reminderData);
+
+      // If user has a linked partner, save to their reminders too
+      if (userProfileSnap.exists()) {
+        const userProfile = userProfileSnap.data();
+        const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+        
+        if (linkedUserId) {
+          const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+          await addDoc(linkedRemindersRef, reminderData);
+          console.log('Reminder saved to both users');
+        }
+      }
+
+      console.log('Reminder saved successfully');
+      Alert.alert('Success', 'Reminder saved!', [
+        { text: 'OK', onPress: () => router.replace('/(tabs)') }
+      ]);
+    } catch (error: any) {
+      console.error('Error saving reminder:', error);
+      Alert.alert('Error', `Failed to save reminder: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
