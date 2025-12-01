@@ -1,12 +1,16 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useNavigation } from '@react-navigation/native';
+import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
+import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Dimensions,
+  Image,
   KeyboardAvoidingView,
   LayoutAnimation,
   Platform,
@@ -20,14 +24,10 @@ import {
   UIManager,
   View
 } from 'react-native';
-import { GiftedChat, IMessage } from 'react-native-gifted-chat';
+import { Bubble, GiftedChat, IMessage } from 'react-native-gifted-chat';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { auth, db } from './firebase.js';
+import { auth, db, getAiChatResponse } from './firebase.js';
 
-// --- Firebase & AI ---
-import { getAiChatResponse } from './firebase.js';
-
-// Firebase
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -35,17 +35,14 @@ import {
   signOut,
   User
 } from 'firebase/auth';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-
-
+import { addDoc, collection, doc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore';
 
 // Canvas variables
 declare const __app_id: string;
 declare const __firebase_config: string;
 
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
-
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
 
 type UserRole = 'elderly' | 'caregiver';
 type UserProfile = {
@@ -56,7 +53,6 @@ type UserProfile = {
   linkedElderlyId: string | null;
   createdAt: string;
 };
-
 
 // Colors & Constants
 const { width } = Dimensions.get('window');
@@ -74,6 +70,7 @@ const COLORS = {
   pending: '#FF9500',
   sosRed: '#D93636',
   alertBg: 'rgba(255, 59, 48, 0.1)',
+  inputBg: '#F2F2F2',
 };
 const WEEK_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -121,6 +118,7 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
   const [name, setName] = useState('');
   const [role, setRole] = useState<UserRole>('elderly');
   const [loading, setLoading] = useState(false);
+
 const handleAuth = async () => {
   if (!email || !password || (!isLogin && !name)) {
     Alert.alert('Error', 'Please fill all fields');
@@ -258,10 +256,6 @@ const ElderlyDashboard = ({ userName }: { userName: string }) => {
             <Ionicons name="share-social" size={28} color="white" />
           </TouchableOpacity>
         </View>
-
-        <Text style={{ marginTop: 12, fontSize: 13, color: COLORS.gray, textAlign: 'center' }}>
-          Tap the share button → send via WhatsApp, SMS, or any app
-        </Text>
       </Card>
 
       <Card style={{ marginTop: 20 }}>
@@ -540,58 +534,540 @@ const CaregiverAlerts = () => (
 const AssistantScreen = () => {
   const [messages, setMessages] = useState<IMessage[]>([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [inputText, setInputText] = useState('');
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [showSidebar, setShowSidebar] = useState(false);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [chatSessions, setChatSessions] = useState<Array<{id: string, title: string, lastMessage: string, timestamp: Date}>>([]);
 
   const AI_USER = { _id: 2, name: 'AI Assistant', avatar: 'https://placehold.co/40x40/007AFF/FFFFFF?text=AI' };
 
   useEffect(() => {
-    setMessages([{
-      _id: 1,
-      text: "Hello! I'm your AI Assistant. Ask me for summaries, trends, or insights.",
-      createdAt: new Date(),
-      user: AI_USER,
-    }]);
+    loadChatSessions();
   }, []);
 
-  const onSend = useCallback((newMessages: IMessage[] = []) => {
-    setMessages(prev => GiftedChat.append(prev, newMessages));
-    const userMessageText = newMessages[0].text;
+  const loadChatSessions = async () => {
+    setIsLoading(true);
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        setMessages([{
+          _id: '1',
+          text: "Hello! I can help you with medicine identification, reminders, or general questions.",
+          createdAt: new Date(),
+          user: AI_USER,
+        }]);
+        setIsLoading(false);
+        return;
+      }
+
+      const chatsRef = collection(db, 'users', currentUser.uid, 'chatSessions');
+      const q = query(chatsRef, orderBy('lastUpdated', 'desc'));
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        // Start new chat if none exist
+        await createNewChat();
+      } else {
+        const sessions = snapshot.docs.map(doc => ({
+          id: doc.id,
+          title: doc.data().title || 'New Chat',
+          lastMessage: doc.data().lastMessage || '',
+          timestamp: doc.data().lastUpdated?.toDate() || new Date(),
+        }));
+        setChatSessions(sessions);
+        
+        // Don't auto-load any chat - show welcome message
+        setMessages([{
+          _id: '1',
+          text: "Hello! I can help you with medicine identification, reminders, or general questions.",
+          createdAt: new Date(),
+          user: AI_USER,
+        }]);
+      }
+      setIsLoading(false);
+    } catch (error) {
+      console.error('Error loading chat sessions:', error);
+      setMessages([{
+        _id: '1',
+        text: "Hello! I can help you with medicine identification, reminders, or general questions.",
+        createdAt: new Date(),
+        user: AI_USER,
+      }]);
+      setIsLoading(false);
+    }
+  };
+
+  const loadChatMessages = async (chatId: string) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+
+      const messagesRef = collection(db, 'users', currentUser.uid, 'chatSessions', chatId, 'messages');
+      const q = query(messagesRef, orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        setMessages([{
+          _id: '1',
+          text: "Hello! I can help you with medicine identification, reminders, or general questions.",
+          createdAt: new Date(),
+          user: AI_USER,
+        }]);
+        return;
+      }
+
+      const loadedMessages = snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          _id: doc.id,
+          text: data.text || '',
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt || Date.now()),
+          user: data.user || { _id: 1 },
+          image: data.image || undefined,
+        };
+      });
+
+      setMessages(loadedMessages);
+    } catch (error) {
+      console.error('Error loading messages:', error);
+    }
+  };
+
+  const createNewChat = async (): Promise<string> => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        console.log('No user logged in');
+        Alert.alert('Error', 'You must be logged in to create a chat');
+        return '';
+      }
+
+      console.log('Creating new chat document for user:', currentUser.uid);
+      const chatsRef = collection(db, 'users', currentUser.uid, 'chatSessions');
+      const newChatRef = await addDoc(chatsRef, {
+        title: 'New Chat',
+        lastMessage: '',
+        lastUpdated: serverTimestamp(),
+        createdAt: serverTimestamp(),
+      });
+
+      const newChatId = newChatRef.id;
+      console.log('✅ New chat document created with ID:', newChatId);
+      
+      // Immediately set current chat ID
+      setCurrentChatId(newChatId);
+      
+      // Set welcome message
+      const welcomeMsg = [{
+        _id: '1',
+        text: "Hello! I can help you with medicine identification, reminders, or general questions.",
+        createdAt: new Date(),
+        user: AI_USER,
+      }];
+      setMessages(welcomeMsg);
+      console.log('✅ Welcome message set');
+      
+      // Add new session to the list
+      const newSession = {
+        id: newChatId,
+        title: 'New Chat',
+        lastMessage: '',
+        timestamp: new Date(),
+      };
+      setChatSessions(prev => {
+        const updated = [newSession, ...prev];
+        console.log('✅ Chat sessions updated. Total:', updated.length);
+        return updated;
+      });
+      
+      return newChatId;
+    } catch (error: any) {
+      console.error('❌ Error creating new chat:', error);
+      console.error('Error details:', error.message, error.code);
+      Alert.alert('Error', `Failed to create new chat: ${error.message}`);
+      return '';
+    }
+  };
+
+  const saveMessageToFirestore = async (message: IMessage, chatId?: string) => {
+    try {
+      const currentUser = auth.currentUser;
+      const activeChatId = chatId || currentChatId;
+      
+      if (!currentUser || !activeChatId) {
+        console.log('Cannot save message: no user or chat ID', { user: !!currentUser, chatId: activeChatId });
+        return;
+      }
+
+      console.log('Saving message to chat:', activeChatId);
+      const messagesRef = collection(db, 'users', currentUser.uid, 'chatSessions', activeChatId, 'messages');
+      await addDoc(messagesRef, {
+        text: message.text,
+        createdAt: serverTimestamp(),
+        user: message.user,
+        image: message.image || null,
+      });
+
+      // Update chat session with last message and title
+      const chatRef = doc(db, 'users', currentUser.uid, 'chatSessions', activeChatId);
+      const updateData: any = {
+        lastMessage: message.text.substring(0, 50),
+        lastUpdated: serverTimestamp(),
+      };
+      
+      // Auto-generate title from first user message
+      if (messages.length <= 1 && message.user._id === 1) {
+        updateData.title = message.text.substring(0, 30) + (message.text.length > 30 ? '...' : '');
+      }
+      
+      await setDoc(chatRef, updateData, { merge: true });
+      console.log('Message saved successfully');
+    } catch (error) {
+      console.error('Error saving message:', error);
+    }
+  };
+
+  const handleNewChat = async () => {
+    console.log('handleNewChat called');
+    setShowSidebar(false);
+    setInputText('');
+    setSelectedImage(null);
+    
+    const newChatId = await createNewChat();
+    console.log('handleNewChat completed with ID:', newChatId);
+  };
+
+  const handlePickImage = async () => {
+    Alert.alert("Upload Photo", "Choose an option", [
+      { text: "Camera", onPress: () => pickImage(true) },
+      { text: "Gallery", onPress: () => pickImage(false) },
+      { text: "Cancel", style: "cancel" }
+    ]);
+  };
+
+  const pickImage = async (useCamera: boolean) => {
+    let result;
+    if (useCamera) {
+      await ImagePicker.requestCameraPermissionsAsync();
+      result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        quality: 0.5,
+        base64: true, // Crucial for sending to AI
+      });
+    } else {
+      await ImagePicker.requestMediaLibraryPermissionsAsync();
+      result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        quality: 0.5,
+        base64: true,
+      });
+    }
+
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      // Store the local URI for preview and base64 for sending
+      setSelectedImage(result.assets[0].uri);
+    }
+  };
+
+  const handleMicPress = async () => {
+    if (isRecording) {
+      // Stop recording and process audio
+      setIsRecording(false);
+      if (recording) {
+        try {
+          await recording.stopAndUnloadAsync();
+          const uri = recording.getURI();
+          setRecording(null);
+          
+          if (uri) {
+            // Ensure we have a chat session
+            let chatId = currentChatId;
+            if (!chatId) {
+              console.log('No current chat ID, creating new chat...');
+              chatId = await createNewChat();
+              if (!chatId) {
+                Alert.alert('Error', 'Could not create chat. Please try again.');
+                return;
+              }
+            }
+            
+            // Read audio file as base64
+            const base64Audio = await FileSystem.readAsStringAsync(uri, { 
+              encoding: FileSystem.EncodingType.Base64 
+            });
+            
+            // Create user message with audio indicator
+            const userMsg: IMessage = {
+              _id: new Date().getTime().toString(),
+              text: '🎤 Voice message',
+              createdAt: new Date(),
+              user: { _id: 1 },
+            };
+            
+            setMessages(prev => GiftedChat.append(prev, [userMsg]));
+            await saveMessageToFirestore(userMsg, chatId);
+            setIsTyping(true);
+            
+            // Send audio to AI
+            try {
+              const result = await getAiChatResponse({ 
+                message: '', 
+                audio: base64Audio 
+              });
+              
+              const botReplyText = (result.data as { reply: string }).reply;
+              
+              const botMessage: IMessage = {
+                _id: (new Date().getTime() + 1).toString(),
+                text: botReplyText,
+                createdAt: new Date(),
+                user: AI_USER,
+              };
+              setMessages(prev => GiftedChat.append(prev, [botMessage]));
+              await saveMessageToFirestore(botMessage, chatId);
+            } catch (error) {
+              console.error('Error processing audio:', error);
+              const errorMessage: IMessage = {
+                _id: (new Date().getTime() + 1).toString(),
+                text: 'Sorry, I had trouble processing your voice message. Please try again.',
+                createdAt: new Date(),
+                user: AI_USER,
+              };
+              setMessages(prev => GiftedChat.append(prev, [errorMessage]));
+              await saveMessageToFirestore(errorMessage, chatId);
+            } finally {
+              setIsTyping(false);
+            }
+          }
+        } catch (err) {
+          console.error('Failed to stop recording', err);
+          Alert.alert("Error", "Failed to process the recording.");
+        }
+      }
+    } else {
+      // Start recording
+      try {
+        await Audio.requestPermissionsAsync();
+        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+        const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+        setRecording(recording);
+        setIsRecording(true);
+      } catch (err) {
+        console.error('Failed to start recording', err);
+        Alert.alert("Error", "Failed to start recording. Please check microphone permissions.");
+      }
+    }
+  };
+
+  const handleSend = async () => {
+    if (!inputText.trim() && !selectedImage) return;
+
+    // Ensure we have a chat session
+    let chatId = currentChatId;
+    if (!chatId) {
+      console.log('No current chat ID, creating new chat...');
+      chatId = await createNewChat();
+      if (!chatId) {
+        Alert.alert('Error', 'Could not create chat. Please try again.');
+        return;
+      }
+      // Update state with new chat ID
+      setCurrentChatId(chatId);
+    }
+
+    console.log('Sending message to chat:', chatId);
+
+    // 1. Construct User Message
+    const userMsg: IMessage = {
+      _id: new Date().getTime().toString(),
+      text: inputText,
+      createdAt: new Date(),
+      user: { _id: 1 },
+      image: selectedImage || undefined,
+    };
+
+    setMessages(prev => GiftedChat.append(prev, [userMsg]));
+    setInputText('');
+    const imageToSend = selectedImage; // Snapshot current image
+    setSelectedImage(null); // Clear preview
     setIsTyping(true);
 
-    getAiChatResponse({ message: userMessageText })
-      .then(result => {
-        const botReplyText = (result.data as { reply: string }).reply;
-        const botMessage = {
-          _id: new Date().getTime(),
-          text: botReplyText,
-          createdAt: new Date(),
-          user: AI_USER,
-        };
-        setMessages(prev => GiftedChat.append(prev, [botMessage]));
-      })
-      .catch(() => {
-        const errorMessage = {
-          _id: new Date().getTime(),
-          text: 'Sorry, I couldn\'t connect. Please try again.',
-          createdAt: new Date(),
-          user: AI_USER,
-        };
-        setMessages(prev => GiftedChat.append(prev, [errorMessage]));
-      })
-      .finally(() => setIsTyping(false));
-  }, []);
+    // Save user message to Firestore with explicit chatId
+    await saveMessageToFirestore(userMsg, chatId);
+
+    try {
+      // 2. Prepare Base64 if image exists
+      let base64Image = null;
+      if (imageToSend) {
+        // If image picker didn't give base64 (sometimes it doesn't on some platforms), read it
+        base64Image = await FileSystem.readAsStringAsync(imageToSend, { encoding: FileSystem.EncodingType.Base64 });
+      }
+
+      // 3. Call Backend
+      const result = await getAiChatResponse({ 
+        message: userMsg.text, 
+        image: base64Image 
+      });
+
+      const botReplyText = (result.data as { reply: string }).reply;
+      
+      const botMessage: IMessage = {
+        _id: (new Date().getTime() + 1).toString(),
+        text: botReplyText,
+        createdAt: new Date(),
+        user: AI_USER,
+      };
+      setMessages(prev => GiftedChat.append(prev, [botMessage]));
+      
+      // Save AI message to Firestore with explicit chatId
+      await saveMessageToFirestore(botMessage, chatId);
+
+    } catch (error) {
+      const errorMessage: IMessage = {
+        _id: (new Date().getTime() + 1).toString(),
+        text: 'Sorry, I had trouble connecting to the AI. Please try again.',
+        createdAt: new Date(),
+        user: AI_USER,
+      };
+      setMessages(prev => GiftedChat.append(prev, [errorMessage]));
+      await saveMessageToFirestore(errorMessage, chatId);
+    } finally {
+      setIsTyping(false);
+    }
+  };
 
   return (
     <View style={styles.screenContainer}>
-      <View style={[styles.header, { borderBottomWidth: 1, borderBottomColor: COLORS.divider }]}>
-        <Text style={styles.headerTitle}>AI Assistant</Text>
+      {/* Sidebar for chat history */}
+      {showSidebar && (
+        <View style={styles.sidebar}>
+          <View style={styles.sidebarHeader}>
+            <Text style={styles.sidebarTitle}>Chats</Text>
+            <TouchableOpacity onPress={() => setShowSidebar(false)}>
+              <Ionicons name="close" size={24} color={COLORS.black} />
+            </TouchableOpacity>
+          </View>
+          <TouchableOpacity style={styles.newChatBtn} onPress={handleNewChat}>
+            <Ionicons name="add" size={20} color={COLORS.white} />
+            <Text style={styles.newChatBtnText}>New Chat</Text>
+          </TouchableOpacity>
+          <ScrollView style={styles.chatList}>
+            {chatSessions.map(session => (
+              <TouchableOpacity
+                key={session.id}
+                style={[
+                  styles.chatSessionItem,
+                  currentChatId === session.id && styles.chatSessionItemActive
+                ]}
+                onPress={async () => {
+                  setCurrentChatId(session.id);
+                  await loadChatMessages(session.id);
+                  setShowSidebar(false);
+                }}
+              >
+                <Text style={styles.chatSessionTitle} numberOfLines={1}>
+                  {session.title}
+                </Text>
+                <Text style={styles.chatSessionPreview} numberOfLines={1}>
+                  {session.lastMessage}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {/* Main chat area */}
+      <View style={{ flex: 1 }}>
+        {/* Header */}
+        <View style={[styles.header, { justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: COLORS.divider }]}>
+          <TouchableOpacity onPress={() => setShowSidebar(true)}>
+            <Ionicons name="menu" size={28} color={COLORS.black} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>AI Assistant</Text>
+          <TouchableOpacity onPress={handleNewChat}>
+            <Ionicons name="create-outline" size={26} color={COLORS.black} />
+          </TouchableOpacity>
+        </View>
+
+        {isLoading ? (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <ActivityIndicator size="large" color={COLORS.primaryBlue} />
+            <Text style={{ marginTop: 10, color: COLORS.gray }}>Loading chat...</Text>
+          </View>
+        ) : (
+          <GiftedChat
+            messages={messages}
+            user={{ _id: 1 }}
+            isTyping={isTyping}
+            renderInputToolbar={() => null} 
+            minInputToolbarHeight={0}
+            contentContainerStyle={{ paddingBottom: 100 }}
+            renderBubble={props => (
+              <Bubble {...props} 
+                wrapperStyle={{ 
+                  right: { backgroundColor: COLORS.primaryBlue }, 
+                  left: { backgroundColor: COLORS.lightGray } 
+                }} 
+                textStyle={{
+                  right: { color: COLORS.white },
+                  left: { color: COLORS.black },
+                }}
+              />
+            )}
+          />
+        )}
+
+        {/* Custom Input Bar */}
+        <KeyboardAvoidingView 
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
+          style={styles.customInputContainer}
+        >
+          {selectedImage && (
+            <View style={styles.imagePreviewContainer}>
+              <Image source={{ uri: selectedImage }} style={styles.imagePreview} />
+              <TouchableOpacity onPress={() => setSelectedImage(null)} style={styles.removeImageBtn}>
+                <Ionicons name="close-circle" size={24} color={COLORS.red} />
+              </TouchableOpacity>
+            </View>
+          )}
+
+          <View style={styles.inputRow}>
+            <TouchableOpacity style={styles.circleBtn} onPress={handlePickImage}>
+              <Ionicons name="add" size={24} color={COLORS.gray} />
+            </TouchableOpacity>
+
+            <TextInput
+              style={styles.pillInput}
+              placeholder="Message AI Assistant..."
+              placeholderTextColor={COLORS.gray}
+              value={inputText}
+              onChangeText={setInputText}
+              multiline
+            />
+
+            {inputText.length > 0 || selectedImage ? (
+              <TouchableOpacity style={[styles.circleBtn, { backgroundColor: COLORS.primaryBlue }]} onPress={handleSend}>
+                <Ionicons name="arrow-up" size={20} color={COLORS.white} />
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity 
+                style={[styles.circleBtn, isRecording && { backgroundColor: COLORS.red }]} 
+                onPress={handleMicPress}
+              >
+                <Ionicons name={isRecording ? "stop" : "mic"} size={20} color={isRecording ? COLORS.white : COLORS.gray} />
+              </TouchableOpacity>
+            )}
+          </View>
+        </KeyboardAvoidingView>
       </View>
-      <GiftedChat
-        messages={messages}
-        onSend={onSend}
-        user={{ _id: 1 }}
-        isTyping={isTyping}
-        placeholder="Ask me about Elderly's care..."
-      />
     </View>
   );
 };
@@ -637,7 +1113,15 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
         tabBarLabelStyle: styles.tabBarLabel,
       }}
     >
-      <Tab.Screen name="Dashboard">
+      <Tab.Screen 
+        name="Dashboard"
+        options={{
+          tabBarLabel: 'Dashboard',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="home-outline" size={size} color={color} />
+          ),
+        }}
+      >
         {() => 
           userProfile.role === 'elderly' 
             ? <ElderlyDashboard userName={userProfile.name} />
@@ -664,10 +1148,27 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
 )
   }}
 />
-      <Tab.Screen name="Alerts">
+      <Tab.Screen 
+        name="Alerts"
+        options={{
+          tabBarLabel: 'Alerts',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="notifications-outline" size={size} color={color} />
+          ),
+        }}
+      >
        {() => userProfile.role === 'elderly' ? <ElderlyAlerts /> : <CaregiverAlerts />}
       </Tab.Screen>
-      <Tab.Screen name="Assistant" component={AssistantScreen} />
+      <Tab.Screen 
+        name="Assistant" 
+        component={AssistantScreen}
+        options={{
+          tabBarLabel: 'Assistant',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="chatbubble-ellipses-outline" size={size} color={color} />
+          ),
+        }}
+      />
     </Tab.Navigator>
   );
 };
@@ -939,6 +1440,55 @@ const styles = StyleSheet.create({
      borderTopColor: COLORS.divider, 
      backgroundColor: COLORS.white },
   tabBarLabel: { fontSize: 12, fontWeight: '600' },
+  
+    customInputContainer: {
+    backgroundColor: COLORS.white,
+    paddingHorizontal: 15,
+    paddingVertical: 5,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.divider,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  circleBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.lightGray,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  pillInput: {
+    flex: 1,
+    backgroundColor: COLORS.inputBg,
+    borderRadius: 25,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    marginHorizontal: 10,
+    fontSize: 16,
+    maxHeight: 100, // Grows as user types
+  },
+  imagePreviewContainer: {
+    flexDirection: 'row',
+    marginBottom: 10,
+    paddingHorizontal: 10,
+  },
+  imagePreview: {
+    width: 80,
+    height: 80,
+    borderRadius: 10,
+    backgroundColor: COLORS.lightGray,
+  },
+  removeImageBtn: {
+    position: 'absolute',
+    top: -10,
+    left: 70,
+    backgroundColor: COLORS.white,
+    borderRadius: 15,
+  },
 
   shareButton: {
     flexDirection: 'row',
@@ -955,5 +1505,73 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: 'bold',
     marginLeft: 10,
+  },
+
+  // ChatGPT-style sidebar styles
+  sidebar: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 280,
+    backgroundColor: COLORS.white,
+    borderRightWidth: 1,
+    borderRightColor: COLORS.divider,
+    zIndex: 1000,
+    shadowColor: '#000',
+    shadowOffset: { width: 2, height: 0 },
+    shadowOpacity: 0.1,
+    shadowRadius: 5,
+    elevation: 5,
+  },
+  sidebarHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.divider,
+  },
+  sidebarTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: COLORS.black,
+  },
+  newChatBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primaryBlue,
+    padding: 12,
+    margin: 15,
+    borderRadius: 10,
+  },
+  newChatBtnText: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  chatList: {
+    flex: 1,
+  },
+  chatSessionItem: {
+    padding: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.divider,
+    backgroundColor: COLORS.white,
+  },
+  chatSessionItemActive: {
+    backgroundColor: COLORS.lightBlue,
+  },
+  chatSessionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.black,
+    marginBottom: 4,
+  },
+  chatSessionPreview: {
+    fontSize: 14,
+    color: COLORS.gray,
   },
 });

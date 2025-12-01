@@ -1,60 +1,86 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 
-exports.getAiChatResponse = onCall({ secrets: ["OPENAI_API_KEY"] }, async (request) => {
-  
-  const geminiKey = process.env.OPENAI_API_KEY;
+// Backend that switches models based on input type
+exports.getAiChatResponse = onCall({ secrets: ["OPENAI_API_KEY"], timeoutSeconds: 60 }, async (request) => {
+  console.log("1. Request received:", JSON.stringify(request.data).substring(0, 100) + "...");
 
+  const geminiKey = process.env.OPENAI_API_KEY;
   if (!geminiKey) {
     throw new HttpsError("internal", "Gemini API Key is not configured.");
   }
 
-  const userMessage = request.data.message;
-  if (!userMessage || typeof userMessage !== 'string') {
-    throw new HttpsError("invalid-argument", "The function must be called with one argument 'message' that is a string.");
+  const { message, image, audio } = request.data;
+
+  if (!message && !image && !audio) {
+    throw new HttpsError("invalid-argument", "Payload is empty.");
   }
 
-  // Using gemini-2.5-flash model
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+  let modelName = "gemini-2.5-flash"; 
+  
+  if (image || audio) {
+    console.log("   -> Detected Vision/Voice content. Switching to gemini-1.5-flash.");
+    modelName = "gemini-1.5-flash";
+  } else {
+    console.log("   -> Text only. Using gemini-2.5-flash.");
+  }
 
-  const requestPayload = {
-    contents: [
-      {
-        parts: [
-          {
-            text: userMessage
-          }
-        ]
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`;
+
+  const parts = [];
+
+  if (message) parts.push({ text: message });
+
+  if (image) {
+    parts.push({
+      inlineData: {
+        mimeType: "image/jpeg",
+        data: image
       }
-    ]
-  };
+    });
+    // Add context prompt if user didn't type anything
+    if (!message) parts.push({ text: "Analyze this image in detail." });
+  }
+
+  if (audio) {
+    parts.push({
+      inlineData: {
+        mimeType: "audio/mp4",
+        data: audio
+      }
+    });
+    // Add context prompt if user didn't type anything
+    if (!message) parts.push({ text: "Listen to this audio and respond." });
+  }
+
+  const payload = { contents: [{ parts }] };
 
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(requestPayload),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("Gemini API Error:", errorBody);
-      throw new HttpsError("internal", `Gemini API Failed: ${response.status} ${response.statusText}`);
+      const errorText = await response.text();
+      console.error(`3. AI Error (${modelName}):`, errorText);
+      throw new HttpsError("internal", `AI Provider Error: ${response.statusText}`);
     }
 
-    const responseData = await response.json();
-
-    if (!responseData.candidates || responseData.candidates.length === 0) {
-      console.error("No candidates in response:", responseData);
-      return { reply: "I'm sorry, I couldn't generate a response to that." };
+    const json = await response.json();
+    
+    // Safety check
+    if (!json.candidates || json.candidates.length === 0) {
+      console.warn("   -> Blocked by safety filters.");
+      return { reply: "I'm sorry, I couldn't process that. It might have triggered a safety filter." };
     }
 
-    const botMessage = responseData.candidates[0].content.parts[0].text;
-    return { reply: botMessage };
+    const reply = json.candidates[0].content.parts[0].text;
+    console.log("4. Success! Reply generated.");
+    return { reply };
 
   } catch (error) {
-    console.error("Error calling Gemini:", error);
-    throw new HttpsError("unknown", "An unexpected error occurred.");
+    console.error("5. Function Error:", error);
+    throw new HttpsError("internal", error.message);
   }
 });

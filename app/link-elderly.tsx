@@ -123,7 +123,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     textAlign: 'center',
     letterSpacing: 2,
-    fontFamily: 'menlo',
   },
   button: {
     backgroundColor: '#007AFF',
