@@ -11,6 +11,7 @@ import {
   LayoutAnimation,
   Platform,
   ScrollView,
+  Share,
   StatusBar,
   StyleSheet,
   Text,
@@ -120,34 +121,38 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
   const [name, setName] = useState('');
   const [role, setRole] = useState<UserRole>('elderly');
   const [loading, setLoading] = useState(false);
+const handleAuth = async () => {
+  if (!email || !password || (!isLogin && !name)) {
+    Alert.alert('Error', 'Please fill all fields');
+    return;
+  }
+  setLoading(true);
+  try {
+    if (isLogin) {
+      await signInWithEmailAndPassword(auth, email, password);
+    } else {
+      // SIGN UP
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+      console.log("New user UID:", user.uid);
 
-  const handleAuth = async () => {
-    if (!email || !password || (!isLogin && !name)) {
-      Alert.alert('Error', 'Please fill all fields');
-      return;
+      await setDoc(doc(db, 'users', user.uid), {
+        name,
+        email,
+        role,
+        uidPrefix12: user.uid.slice(0, 12).toUpperCase(),   
+        linkedCaregiverId: null,
+        linkedElderlyId: null,
+        createdAt: new Date().toISOString(),
+      });
     }
-    setLoading(true);
-    try {
-      if (isLogin) {
-        await signInWithEmailAndPassword(auth, email, password);
-      } else {
-        const cred = await createUserWithEmailAndPassword(auth, email, password);
-        await setDoc(doc(db, 'users', cred.user.uid), {
-          name,
-          email,
-          role,
-          linkedCaregiverId: null,
-          linkedElderlyId: null,
-          createdAt: new Date().toISOString(),
-        });
-      }
-      onSuccess();
-    } catch (e: any) {
-      Alert.alert('Error', e.message || 'Something went wrong');
-    } finally {
-      setLoading(false);
-    }
-  };
+    onSuccess();
+  } catch (e: any) {
+    Alert.alert('Error', e.message);
+  } finally {
+    setLoading(false);
+  }
+};
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.white }}>
@@ -192,52 +197,111 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
 };
 
 //  screens 
-const ElderlyDashboard = ({ userName }: { userName: string }) => (
-  <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
-    <View style={styles.header}>
-      <Text style={styles.headerTitle}>Hello, {userName}</Text>
-      <TouchableOpacity>
-        <Ionicons name="mic-outline" size={30} color={COLORS.primaryBlue} />
-      </TouchableOpacity>
-    </View>
+const ElderlyDashboard = ({ userName }: { userName: string }) => {
+  const currentUser = auth.currentUser;
+  const shareCode = currentUser?.uid?.slice(0, 12).toUpperCase() || "LOADING...";
 
-    <Card>
-      <Text style={styles.cardTitle}>Goals for Today</Text>
-      <View style={styles.goalItem}>
-        <Ionicons name="medkit-outline" size={24} color={COLORS.primaryBlue} />
-        <View style={styles.goalText}>
-          <Text style={styles.goalTitle}>Medications Taken</Text>
-          <Text style={styles.goalSubtitle}>3 of 4 completed</Text>
-        </View>
-      </View>
-      <View style={styles.progressBarContainer}>
-        <View style={[styles.progressBar, { width: '75%' }]} />
+  const handleShare = async () => {
+  const shareCode = auth.currentUser?.uid.slice(0, 12).toUpperCase();
+
+  await Share.share({
+    message: `Hi! Please take care of me on Elderly Care app.\nMy code: ${shareCode}`,
+    url: `https://elderlycare.app/link/${auth.currentUser?.uid}`,   
+    title: "Connect with Me",
+  });
+};
+
+  return (
+    <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Hello, {userName}</Text>
+        <TouchableOpacity>
+          <Ionicons name="mic-outline" size={30} color={COLORS.primaryBlue} />
+        </TouchableOpacity>
       </View>
 
-      <View style={styles.goalItem}>
-        <Ionicons name="walk-outline" size={24} color={COLORS.primaryBlue} />
-        <View style={styles.goalText}>
-          <Text style={styles.goalTitle}>Morning Walk</Text>
-          <Text style={styles.goalSubtitle}>15 of 30 minutes</Text>
-        </View>
-      </View>
-      <View style={styles.progressBarContainer}>
-        <View style={[styles.progressBar, { width: '50%' }]} />
-      </View>
-    </Card>
+      <Card style={{ marginHorizontal: 20, marginTop: 20, padding: 20 }}>
+        <Text style={styles.cardTitle}>Invite Your Caregiver</Text>
+        <Text style={{ color: COLORS.gray, marginVertical: 10, fontSize: 15 }}>
+          Share this code with your caregiver:
+        </Text>
 
-    <Card style={styles.nextReminderCard}>
-      <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>Next Reminder</Text>
-      <View style={styles.reminderItem}>
-        <Ionicons name="time-outline" size={24} color={COLORS.white} />
-        <View style={styles.reminderText}>
-          <Text style={styles.reminderTitle}>Lunch with Diana</Text>
-          <Text style={styles.reminderTime}>1:00 PM</Text>
+        <View style={{
+          flexDirection: 'row',
+          backgroundColor: '#f0f0f0',
+          padding: 18,
+          borderRadius: 15,
+          alignItems: 'center',
+          justifyContent: 'space-between'
+        }}>
+          <Text style={{
+            fontSize: 26,
+            fontWeight: 'bold',
+            letterSpacing: 5,
+            color: COLORS.primaryBlue
+          }}>
+            {shareCode}
+          </Text>
+
+          <TouchableOpacity
+            onPress={handleShare}
+            style={{
+              backgroundColor: COLORS.primaryBlue,
+              width: 50,
+              height: 50,
+              borderRadius: 25,
+              justifyContent: 'center',
+              alignItems: 'center'
+            }}
+          >
+            <Ionicons name="share-social" size={28} color="white" />
+          </TouchableOpacity>
         </View>
-      </View>
-    </Card>
-  </ScrollView>
-);
+
+        <Text style={{ marginTop: 12, fontSize: 13, color: COLORS.gray, textAlign: 'center' }}>
+          Tap the share button → send via WhatsApp, SMS, or any app
+        </Text>
+      </Card>
+
+      <Card style={{ marginTop: 20 }}>
+        <Text style={styles.cardTitle}>Goals for Today</Text>
+        <View style={styles.goalItem}>
+          <Ionicons name="medkit-outline" size={24} color={COLORS.primaryBlue} />
+          <View style={styles.goalText}>
+            <Text style={styles.goalTitle}>Medications Taken</Text>
+            <Text style={styles.goalSubtitle}>3 of 4 completed</Text>
+          </View>
+        </View>
+        <View style={styles.progressBarContainer}>
+          <View style={[styles.progressBar, { width: '75%' }]} />
+        </View>
+
+        <View style={styles.goalItem}>
+          <Ionicons name="walk-outline" size={24} color={COLORS.primaryBlue} />
+          <View style={styles.goalText}>
+            <Text style={styles.goalTitle}>Morning Walk</Text>
+            <Text style={styles.goalSubtitle}>15 of 30 minutes</Text>
+          </View>
+        </View>
+        <View style={styles.progressBarContainer}>
+          <View style={[styles.progressBar, { width: '50%' }]} />
+        </View>
+      </Card>
+
+      <Card style={[styles.nextReminderCard, { marginTop: 20 }]}>
+        <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>Next Reminder</Text>
+        <View style={styles.reminderItem}>
+          <Ionicons name="time-outline" size={24} color={COLORS.white} />
+          <View style={styles.reminderText}>
+            <Text style={styles.reminderTitle}>Lunch with Diana</Text>
+            <Text style={styles.reminderTime}>1:00 PM</Text>
+          </View>
+        </View>
+      </Card>
+    </ScrollView>
+  );
+};
 
 
 const CaregiverDashboard = ({ userProfile, elderlyProfile }: { 
@@ -526,7 +590,7 @@ const AssistantScreen = () => {
         onSend={onSend}
         user={{ _id: 1 }}
         isTyping={isTyping}
-        placeholder="Ask me about Eleanor's care..."
+        placeholder="Ask me about Elderly's care..."
       />
     </View>
   );
