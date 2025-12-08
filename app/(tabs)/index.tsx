@@ -1,4 +1,5 @@
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { Audio } from 'expo-av';
@@ -24,7 +25,7 @@ import {
   UIManager,
   View
 } from 'react-native';
-import { Bubble, GiftedChat, IMessage } from 'react-native-gifted-chat';
+import { GiftedChat, IMessage } from 'react-native-gifted-chat';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { auth, db, getAiChatResponse } from './firebase.js';
 
@@ -49,6 +50,8 @@ type UserProfile = {
   name: string;
   email: string;
   role: UserRole;
+  gender?: string;
+  dateOfBirth?: string;
   linkedCaregiverId: string | null;
   linkedElderlyId: string | null;
   createdAt: string;
@@ -136,6 +139,9 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [gender, setGender] = useState('Male');
+  const [dateOfBirth, setDateOfBirth] = useState('');
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [role, setRole] = useState<UserRole>('elderly');
   const [loading, setLoading] = useState(false);
 
@@ -144,6 +150,12 @@ const handleAuth = async () => {
     Alert.alert('Error', 'Please fill all fields');
     return;
   }
+  
+  if (!isLogin && !dateOfBirth) {
+    Alert.alert('Error', 'Please select your date of birth');
+    return;
+  }
+  
   setLoading(true);
   try {
     if (isLogin) {
@@ -158,6 +170,8 @@ const handleAuth = async () => {
         name,
         email,
         role,
+        gender,
+        dateOfBirth,
         uidPrefix12: user.uid.slice(0, 12).toUpperCase(),   
         linkedCaregiverId: null,
         linkedElderlyId: null,
@@ -166,7 +180,21 @@ const handleAuth = async () => {
     }
     onSuccess();
   } catch (e: any) {
-    Alert.alert('Error', e.message);
+    // Check for specific Firebase auth errors
+    if (e.code === 'auth/invalid-credential' || 
+        e.code === 'auth/wrong-password' || 
+        e.code === 'auth/user-not-found' ||
+        e.code === 'auth/invalid-email') {
+      Alert.alert('Error', 'Wrong email or password');
+    } else if (e.code === 'auth/too-many-requests') {
+      Alert.alert('Error', 'Too many failed attempts. Please try again later.');
+    } else if (e.code === 'auth/email-already-in-use') {
+      Alert.alert('Error', 'This email is already registered');
+    } else if (e.code === 'auth/weak-password') {
+      Alert.alert('Error', 'Password should be at least 6 characters');
+    } else {
+      Alert.alert('Error', e.message);
+    }
   } finally {
     setLoading(false);
   }
@@ -176,14 +204,79 @@ const handleAuth = async () => {
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.white }}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.authContainer}>
-          <Ionicons name="heart-outline" size={100} color={COLORS.primaryBlue} />
           <Text style={styles.authTitle}>{isLogin ? 'Welcome Back' : 'Create Account'}</Text>
 
           {!isLogin && (
             <TextInput style={styles.input} placeholder="Your Name" value={name} onChangeText={setName} />
           )}
-          <TextInput style={styles.input} placeholder="Email" keyboardType="email-address" autoCapitalize="none" value={email} onChangeText={setEmail} />
-          <TextInput style={styles.input} placeholder="Password" secureTextEntry value={password} onChangeText={setPassword} />
+          
+          {!isLogin && (
+            <View style={styles.genderContainer}>
+              <Text style={styles.fieldLabel}>Gender:</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginTop: 8 }}>
+                <TouchableOpacity 
+                  style={[styles.genderBtn, gender === 'Male' && styles.genderActive]} 
+                  onPress={() => setGender('Male')}
+                >
+                  <Ionicons name="male" size={20} color={gender === 'Male' ? COLORS.white : COLORS.gray} />
+                  <Text style={gender === 'Male' ? styles.genderTextActive : styles.genderText}>Male</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.genderBtn, gender === 'Female' && styles.genderActive]} 
+                  onPress={() => setGender('Female')}
+                >
+                  <Ionicons name="female" size={20} color={gender === 'Female' ? COLORS.white : COLORS.gray} />
+                  <Text style={gender === 'Female' ? styles.genderTextActive : styles.genderText}>Female</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+          
+          {!isLogin && (
+            <View style={styles.dobContainer}>
+              <Text style={styles.fieldLabel}>Date of Birth:</Text>
+              <TouchableOpacity 
+                style={styles.dobButton} 
+                onPress={() => setShowDatePicker(true)}
+              >
+                <Text style={styles.dobText}>
+                  {dateOfBirth || 'Select Date'}
+                </Text>
+                <Ionicons name="calendar-outline" size={20} color={COLORS.primaryBlue} />
+              </TouchableOpacity>
+              {showDatePicker && (
+                <DateTimePicker
+                  value={dateOfBirth ? new Date(dateOfBirth) : new Date()}
+                  mode="date"
+                  display="default"
+                  maximumDate={new Date()}
+                  onChange={(event, selectedDate) => {
+                    setShowDatePicker(Platform.OS === 'ios');
+                    if (selectedDate && event.type !== 'dismissed') {
+                      setDateOfBirth(selectedDate.toLocaleDateString('en-US'));
+                    }
+                  }}
+                />
+              )}
+            </View>
+          )}
+          
+          <TextInput 
+            style={styles.input} 
+            placeholder="Email" 
+            keyboardType="email-address" 
+            autoCapitalize="none" 
+            value={email} 
+            onChangeText={setEmail} />
+          <TextInput 
+            style={styles.input} 
+            placeholder="Password" 
+            secureTextEntry={true}
+            autoCapitalize="none"
+            autoCorrect={false}
+            value={password} 
+            onChangeText={setPassword} 
+          />
 
           {!isLogin && (
             <View style={styles.roleContainer}>
@@ -834,12 +927,7 @@ const AssistantScreen = () => {
     try {
       const currentUser = auth.currentUser;
       if (!currentUser) {
-        setMessages([{
-          _id: '1',
-          text: "Hello! I can help you with medicine identification, reminders, or general questions.",
-          createdAt: new Date(),
-          user: AI_USER,
-        }]);
+        setMessages([]);
         setIsLoading(false);
         return;
       }
@@ -860,23 +948,13 @@ const AssistantScreen = () => {
         }));
         setChatSessions(sessions);
         
-        // Don't auto-load any chat - show welcome message
-        setMessages([{
-          _id: '1',
-          text: "Hello! I can help you with medicine identification, reminders, or general questions.",
-          createdAt: new Date(),
-          user: AI_USER,
-        }]);
+        // Don't auto-load any chat - show empty state
+        setMessages([]);
       }
       setIsLoading(false);
     } catch (error) {
       console.error('Error loading chat sessions:', error);
-      setMessages([{
-        _id: '1',
-        text: "Hello! I can help you with medicine identification, reminders, or general questions.",
-        createdAt: new Date(),
-        user: AI_USER,
-      }]);
+      setMessages([]);
       setIsLoading(false);
     }
   };
@@ -891,12 +969,7 @@ const AssistantScreen = () => {
       const snapshot = await getDocs(q);
 
       if (snapshot.empty) {
-        setMessages([{
-          _id: '1',
-          text: "Hello! I can help you with medicine identification, reminders, or general questions.",
-          createdAt: new Date(),
-          user: AI_USER,
-        }]);
+        setMessages([]);
         return;
       }
 
@@ -941,15 +1014,9 @@ const AssistantScreen = () => {
       // Immediately set current chat ID
       setCurrentChatId(newChatId);
       
-      // Set welcome message
-      const welcomeMsg = [{
-        _id: '1',
-        text: "Hello! I can help you with medicine identification, reminders, or general questions.",
-        createdAt: new Date(),
-        user: AI_USER,
-      }];
-      setMessages(welcomeMsg);
-      console.log('✅ Welcome message set');
+      // Clear messages for new chat
+      setMessages([]);
+      console.log('✅ New chat ready');
       
       // Add new session to the list
       const newSession = {
@@ -1223,7 +1290,11 @@ const AssistantScreen = () => {
   };
 
   return (
-    <View style={styles.screenContainer}>
+    <KeyboardAvoidingView 
+      style={styles.screenContainer}
+      behavior='padding'
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 78}
+    >
       {/* Sidebar for chat history */}
       {showSidebar && (
         <View style={styles.sidebar}>
@@ -1282,73 +1353,93 @@ const AssistantScreen = () => {
             <Text style={{ marginTop: 10, color: COLORS.gray }}>Loading chat...</Text>
           </View>
         ) : (
-          <GiftedChat
-            messages={messages}
-            user={{ _id: 1 }}
-            isTyping={isTyping}
-            renderInputToolbar={() => null} 
-            minInputToolbarHeight={0}
-            contentContainerStyle={{ paddingBottom: 100 }}
-            renderBubble={props => (
-              <Bubble {...props} 
-                wrapperStyle={{ 
-                  right: { backgroundColor: COLORS.primaryBlue }, 
-                  left: { backgroundColor: COLORS.lightGray } 
-                }} 
-                textStyle={{
-                  right: { color: COLORS.white },
-                  left: { color: COLORS.black },
-                }}
-              />
-            )}
-          />
-        )}
-
-        {/* Custom Input Bar */}
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-          style={styles.customInputContainer}
-        >
-          {selectedImage && (
-            <View style={styles.imagePreviewContainer}>
-              <Image source={{ uri: selectedImage }} style={styles.imagePreview} />
-              <TouchableOpacity onPress={() => setSelectedImage(null)} style={styles.removeImageBtn}>
-                <Ionicons name="close-circle" size={24} color={COLORS.red} />
-              </TouchableOpacity>
-            </View>
-          )}
-
-          <View style={styles.inputRow}>
-            <TouchableOpacity style={styles.circleBtn} onPress={handlePickImage}>
-              <Ionicons name="add" size={24} color={COLORS.gray} />
-            </TouchableOpacity>
-
-            <TextInput
-              style={styles.pillInput}
-              placeholder="Message AI Assistant..."
-              placeholderTextColor={COLORS.gray}
-              value={inputText}
-              onChangeText={setInputText}
-              multiline
-            />
-
-            {inputText.length > 0 || selectedImage ? (
-              <TouchableOpacity style={[styles.circleBtn, { backgroundColor: COLORS.primaryBlue }]} onPress={handleSend}>
-                <Ionicons name="arrow-up" size={20} color={COLORS.white} />
-              </TouchableOpacity>
+          <View style={{ flex: 1 }}>
+            {messages.length === 0 ? (
+              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 }}>
+                <Text style={{ fontSize: 24, fontWeight: 'bold', color: COLORS.black, textAlign: 'center' }}>
+                  How can I help you today?
+                </Text>
+              </View>
             ) : (
-              <TouchableOpacity 
-                style={[styles.circleBtn, isRecording && { backgroundColor: COLORS.red }]} 
-                onPress={handleMicPress}
+              <ScrollView 
+                ref={(ref) => { if (ref) ref.scrollToEnd({ animated: true }); }}
+                style={{ flex: 1 }}
+                contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 10 }}
               >
-                <Ionicons name={isRecording ? "stop" : "mic"} size={20} color={isRecording ? COLORS.white : COLORS.gray} />
-              </TouchableOpacity>
+                {messages.slice().reverse().map((message) => (
+                  <View key={message._id} style={{ marginBottom: 16, alignItems: message.user._id === 1 ? 'flex-end' : 'flex-start' }}>
+                    <View style={{
+                      maxWidth: '80%',
+                      padding: 12,
+                      borderRadius: 16,
+                      backgroundColor: message.user._id === 1 ? COLORS.primaryBlue : COLORS.lightGray,
+                    }}>
+                      {message.image && (
+                        <Image source={{ uri: message.image }} style={{ width: 200, height: 200, borderRadius: 8, marginBottom: 8 }} />
+                      )}
+                      <Text style={{ color: message.user._id === 1 ? COLORS.white : COLORS.black, fontSize: 16 }}>
+                        {message.text}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+                {isTyping && (
+                  <View style={{ marginBottom: 16, alignItems: 'flex-start' }}>
+                    <View style={{
+                      padding: 12,
+                      borderRadius: 16,
+                      backgroundColor: COLORS.lightGray,
+                    }}>
+                      <Text style={{ color: COLORS.gray }}>Typing...</Text>
+                    </View>
+                  </View>
+                )}
+              </ScrollView>
             )}
+
+            {/* Custom Input Bar - Fixed at bottom */}
+            <View style={styles.customInputContainer}>
+              {selectedImage && (
+                <View style={styles.imagePreviewContainer}>
+                  <Image source={{ uri: selectedImage }} style={styles.imagePreview} />
+                  <TouchableOpacity onPress={() => setSelectedImage(null)} style={styles.removeImageBtn}>
+                    <Ionicons name="close-circle" size={24} color={COLORS.red} />
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              <View style={styles.inputRow}>
+                <TouchableOpacity style={styles.circleBtn} onPress={handlePickImage}>
+                  <Ionicons name="add" size={24} color={COLORS.gray} />
+                </TouchableOpacity>
+
+                <TextInput
+                  style={styles.pillInput}
+                  placeholder="Message AI Assistant..."
+                  placeholderTextColor={COLORS.gray}
+                  value={inputText}
+                  onChangeText={setInputText}
+                  multiline
+                />
+
+                {inputText.length > 0 || selectedImage ? (
+                  <TouchableOpacity style={[styles.circleBtn, { backgroundColor: COLORS.primaryBlue }]} onPress={handleSend}>
+                    <Ionicons name="arrow-up" size={20} color={COLORS.white} />
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity 
+                    style={[styles.circleBtn, isRecording && { backgroundColor: COLORS.red }]} 
+                    onPress={handleMicPress}
+                  >
+                    <Ionicons name={isRecording ? "stop" : "mic"} size={20} color={isRecording ? COLORS.white : COLORS.gray} />
+                  </TouchableOpacity>
+                )}
+              </View>
+            </View>
           </View>
-        </KeyboardAvoidingView>
+        )}
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 };
 
@@ -1429,6 +1520,16 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
   }}
 />
       <Tab.Screen 
+        name="Assistant" 
+        component={AssistantScreen}
+        options={{
+          tabBarLabel: 'Assistant',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="chatbubble-ellipses-outline" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tab.Screen 
         name="Alerts"
         options={{
           tabBarLabel: 'Alerts',
@@ -1439,16 +1540,6 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
       >
        {() => userProfile.role === 'elderly' ? <ElderlyAlerts /> : <CaregiverAlerts />}
       </Tab.Screen>
-      <Tab.Screen 
-        name="Assistant" 
-        component={AssistantScreen}
-        options={{
-          tabBarLabel: 'Assistant',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="chatbubble-ellipses-outline" size={size} color={color} />
-          ),
-        }}
-      />
     </Tab.Navigator>
   );
 };
@@ -1554,6 +1645,13 @@ const styles = StyleSheet.create({
     padding: 30 
   },
 
+  authTitle: {
+    fontSize: 32,
+    fontWeight: 'bold',
+    color: COLORS.black,
+    marginBottom: 30,
+  },
+
   authFormWrapper: {
     width: '100%',
     maxWidth: 380,        
@@ -1581,13 +1679,14 @@ const styles = StyleSheet.create({
   },
 
   roleContainer: { 
-    width: '100%', 
-    maxWidth: 340,
-    marginVertical: 15 
+    width: 320, 
+    marginVertical: 15,
+    alignSelf: 'center',
   },
   roleLabel: { fontSize: 16, 
     marginBottom: 10, 
-    color: COLORS.gray },
+    color: COLORS.black,
+    fontWeight: '600' },
   roleBtn: { padding: 14, 
     borderRadius: 12,
      backgroundColor: '#f0f0f0', 
@@ -1597,6 +1696,57 @@ const styles = StyleSheet.create({
   roleText: { fontSize: 16 },
   roleTextActive: { color: '#fff', 
     fontWeight: 'bold' },
+  genderContainer: {
+    width: 320,
+    marginVertical: 10,
+    alignSelf: 'center',
+  },
+  fieldLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.black,
+    marginBottom: 8,
+  },
+  genderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: '#f0f0f0',
+    width: '45%',
+    justifyContent: 'center',
+  },
+  genderActive: {
+    backgroundColor: COLORS.primaryBlue,
+  },
+  genderText: {
+    fontSize: 16,
+    color: COLORS.gray,
+  },
+  genderTextActive: {
+    fontSize: 16,
+    color: COLORS.white,
+    fontWeight: 'bold',
+  },
+  dobContainer: {
+    width: 320,
+    marginVertical: 10,
+    alignSelf: 'center',
+  },
+  dobButton: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 15,
+    borderRadius: 12,
+    backgroundColor: COLORS.lightGray,
+    marginTop: 8,
+  },
+  dobText: {
+    fontSize: 16,
+    color: COLORS.black,
+  },
   toggleContainer: { flexDirection: 'row', 
     justifyContent: 'space-between', 
     padding: 15, 
@@ -1715,12 +1865,15 @@ const styles = StyleSheet.create({
   alertTime: { fontSize: 14, color: COLORS.black, marginVertical: 4 },
   locationContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
   alertLocation: { fontSize: 14, color: COLORS.gray, marginLeft: 5 },
-  tabBar: { height: 90, 
+  tabBar: { 
+    height: 90, 
     paddingTop: 10,
-     paddingBottom: 30, 
-     borderTopWidth: 1, 
-     borderTopColor: COLORS.divider, 
-     backgroundColor: COLORS.white },
+    paddingBottom: 30, 
+    borderTopWidth: 1, 
+    borderTopColor: COLORS.divider, 
+    backgroundColor: COLORS.white,
+    justifyContent: 'space-around',
+  },
   tabBarLabel: { fontSize: 12, fontWeight: '600' },
   
     customInputContainer: {
