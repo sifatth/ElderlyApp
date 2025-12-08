@@ -35,7 +35,7 @@ import {
   signOut,
   User
 } from 'firebase/auth';
-import { addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 
 // Canvas variables
 declare const __app_id: string;
@@ -89,16 +89,20 @@ const TaskItem = ({
   time,
   status,
   statusColor,
-  onPress,
+  onStatusPress,
+  onEdit,
+  onDelete,
 }: {
   icon: any;
   title: string;
   time: string;
   status?: string;
   statusColor?: string;
-  onPress?: () => void;
+  onStatusPress?: () => void;
+  onEdit?: () => void;
+  onDelete?: () => void;
 }) => (
-  <TouchableOpacity style={styles.taskItem} onPress={onPress}>
+  <View style={styles.taskItem}>
     <View style={styles.taskIconContainer}>
       <MaterialCommunityIcons name={icon} size={24} color={COLORS.primaryBlue} />
     </View>
@@ -106,8 +110,24 @@ const TaskItem = ({
       <Text style={styles.taskTitle}>{title}</Text>
       <Text style={styles.taskTime}>{time}</Text>
     </View>
-    {status && <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>}
-  </TouchableOpacity>
+    {status && (
+      <TouchableOpacity onPress={onStatusPress}>
+        <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>
+      </TouchableOpacity>
+    )}
+    <View style={styles.taskActions}>
+      {onEdit && (
+        <TouchableOpacity onPress={onEdit} style={styles.iconButton}>
+          <Ionicons name="create-outline" size={22} color={COLORS.primaryBlue} />
+        </TouchableOpacity>
+      )}
+      {onDelete && (
+        <TouchableOpacity onPress={onDelete} style={styles.iconButton}>
+          <Ionicons name="trash-outline" size={22} color={COLORS.red} />
+        </TouchableOpacity>
+      )}
+    </View>
+  </View>
 );
 
 // Login / Sign Up Screen
@@ -391,6 +411,7 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile }: {
 };
 const RemindersScreen = () => {
   const navigation = useNavigation();
+  const router = useRouter();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [isCalendarExpanded, setCalendarExpanded] = useState(false);
@@ -468,6 +489,8 @@ const RemindersScreen = () => {
   };
 
   const getRemindersForDate = (date: Date) => {
+    const dateString = date.toDateString();
+    
     return reminders.filter(reminder => {
       if (reminder.repeatOption === 'Daily') {
         return true;
@@ -479,7 +502,157 @@ const RemindersScreen = () => {
         return reminderDate.toDateString() === date.toDateString();
       }
       return false;
+    }).map(reminder => {
+      // For Daily and Weekly reminders, check if this specific date is completed
+      if (reminder.repeatOption === 'Daily' || reminder.repeatOption === 'Weekly') {
+        const completedDates = reminder.completedDates || [];
+        const status = completedDates.includes(dateString) ? 'Completed' : 'Pending';
+        return { ...reminder, status, currentDateString: dateString };
+      }
+      // For Once reminders, use the global status
+      return { ...reminder, currentDateString: dateString };
     });
+  };
+
+  const handleToggleStatus = async (reminder: any) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+
+      const dateString = reminder.currentDateString || selectedDate.toDateString();
+      
+      // For Daily and Weekly reminders, use date-specific completion tracking
+      if (reminder.repeatOption === 'Daily' || reminder.repeatOption === 'Weekly') {
+        const completedDates = reminder.completedDates || [];
+        const isCompleted = completedDates.includes(dateString);
+        
+        let updatedCompletedDates;
+        if (isCompleted) {
+          // Remove date from completed list
+          updatedCompletedDates = completedDates.filter((d: string) => d !== dateString);
+        } else {
+          // Add date to completed list
+          updatedCompletedDates = [...completedDates, dateString];
+        }
+
+        const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
+        await updateDoc(reminderRef, { completedDates: updatedCompletedDates });
+
+        // Update in linked user's collection too
+        const userProfileRef = doc(db, 'users', currentUser.uid);
+        const userProfileSnap = await getDoc(userProfileRef);
+        
+        if (userProfileSnap.exists()) {
+          const userProfile = userProfileSnap.data();
+          const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+          
+          if (linkedUserId) {
+            const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+            const linkedSnapshot = await getDocs(linkedRemindersRef);
+            
+            linkedSnapshot.docs.forEach(async (docSnap) => {
+              const data = docSnap.data();
+              if (data.createdBy === reminder.createdBy && data.title === reminder.title && data.date === reminder.date) {
+                await updateDoc(doc(db, 'users', linkedUserId, 'reminders', docSnap.id), { completedDates: updatedCompletedDates });
+              }
+            });
+          }
+        }
+      } else {
+        // For Once reminders, toggle global status
+        const newStatus = reminder.status === 'Pending' ? 'Completed' : 'Pending';
+        
+        const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
+        await updateDoc(reminderRef, { status: newStatus });
+
+        const userProfileRef = doc(db, 'users', currentUser.uid);
+        const userProfileSnap = await getDoc(userProfileRef);
+        
+        if (userProfileSnap.exists()) {
+          const userProfile = userProfileSnap.data();
+          const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+          
+          if (linkedUserId) {
+            const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+            const linkedSnapshot = await getDocs(linkedRemindersRef);
+            
+            linkedSnapshot.docs.forEach(async (docSnap) => {
+              const data = docSnap.data();
+              if (data.createdBy === reminder.createdBy && data.title === reminder.title && data.date === reminder.date) {
+                await updateDoc(doc(db, 'users', linkedUserId, 'reminders', docSnap.id), { status: newStatus });
+              }
+            });
+          }
+        }
+      }
+
+      loadReminders();
+    } catch (error: any) {
+      console.error('Error updating reminder:', error);
+      Alert.alert('Error', `Failed to update reminder: ${error.message}`);
+    }
+  };
+
+  const handleEditReminder = (reminder: any) => {
+    router.push({
+      pathname: '/edit-reminder',
+      params: {
+        id: reminder.id,
+        title: reminder.title,
+        time: reminder.time,
+        repeatOption: reminder.repeatOption
+      }
+    });
+  };
+
+  const handleDeleteReminder = async (reminder: any) => {
+    Alert.alert(
+      'Delete Reminder',
+      'Are you sure you want to delete this reminder?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const currentUser = auth.currentUser;
+              if (!currentUser) return;
+
+              const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
+              await deleteDoc(reminderRef);
+
+              // Delete from linked user's collection too
+              const userProfileRef = doc(db, 'users', currentUser.uid);
+              const userProfileSnap = await getDoc(userProfileRef);
+              
+              if (userProfileSnap.exists()) {
+                const userProfile = userProfileSnap.data();
+                const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+                
+                if (linkedUserId) {
+                  const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+                  const linkedSnapshot = await getDocs(linkedRemindersRef);
+                  
+                  linkedSnapshot.docs.forEach(async (docSnap) => {
+                    const data = docSnap.data();
+                    if (data.createdBy === reminder.createdBy && data.title === reminder.title && data.date === reminder.date) {
+                      await deleteDoc(doc(db, 'users', linkedUserId, 'reminders', docSnap.id));
+                    }
+                  });
+                }
+              }
+
+              Alert.alert('Success', 'Reminder deleted!');
+              loadReminders();
+            } catch (error: any) {
+              console.error('Error deleting reminder:', error);
+              Alert.alert('Error', `Failed to delete reminder: ${error.message}`);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const changeMonth = (increment: number) => {
@@ -591,6 +764,9 @@ const RemindersScreen = () => {
                 time={reminder.time || '10:00 AM'} 
                 status={reminder.status || 'Pending'} 
                 statusColor={reminder.status === 'Completed' ? COLORS.green : COLORS.pending}
+                onStatusPress={() => handleToggleStatus(reminder)}
+                onEdit={() => handleEditReminder(reminder)}
+                onDelete={() => handleDeleteReminder(reminder)}
               />
               {index < getRemindersForDate(selectedDate).length - 1 && <View style={styles.divider} />}
             </View>
@@ -1494,7 +1670,9 @@ const styles = StyleSheet.create({
   taskTextContainer: { flex: 1, marginLeft: 15 },
   taskTitle: { fontSize: 16, fontWeight: '600' },
   taskTime: { fontSize: 14, color: COLORS.gray },
-  taskStatus: { fontSize: 14, fontWeight: '600' },
+  taskStatus: { fontSize: 14, fontWeight: '600', marginRight: 8 },
+  taskActions: { flexDirection: 'row', alignItems: 'center' },
+  iconButton: { padding: 8, marginLeft: 4 },
   divider: { height: 1, backgroundColor: COLORS.divider, marginVertical: 5, marginHorizontal: 20 },
   calendarContainer: { marginHorizontal: 20, 
     borderRadius: 15,

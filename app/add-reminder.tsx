@@ -4,14 +4,14 @@ import { Stack, useRouter } from 'expo-router';
 import { addDoc, collection, doc, getDoc, serverTimestamp } from 'firebase/firestore';
 import React, { useState } from 'react';
 import {
-    Alert,
-    Platform,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  Alert,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View
 } from 'react-native';
 import { auth, db } from './(tabs)/firebase';
 
@@ -109,6 +109,7 @@ const AddReminderScreen = () => {
         date: date.toISOString(),
         time: date.toTimeString().split(' ')[0],
         status: 'Pending',
+        completedDates: [], // For tracking completed dates for Daily/Weekly reminders
         createdBy: currentUser.uid,
         createdAt: serverTimestamp(),
       };
@@ -131,7 +132,7 @@ const AddReminderScreen = () => {
 
       console.log('Reminder saved successfully');
       Alert.alert('Success', 'Reminder saved!', [
-        { text: 'OK', onPress: () => router.replace('/(tabs)') }
+        { text: 'OK', onPress: () => router.dismiss() }
       ]);
     } catch (error: any) {
       console.error('Error saving reminder:', error);
