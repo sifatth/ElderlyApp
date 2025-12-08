@@ -215,19 +215,77 @@ const handleAuth = async () => {
 };
 
 //  screens 
-const ElderlyDashboard = ({ userName }: { userName: string }) => {
+const ElderlyDashboard = ({ userName, targetUserId }: { userName: string; targetUserId?: string }) => {
   const currentUser = auth.currentUser;
-  const shareCode = currentUser?.uid?.slice(0, 12).toUpperCase() || "LOADING...";
+  const effectiveUserId = targetUserId || currentUser?.uid;
+  const shareCode = effectiveUserId?.slice(0, 12).toUpperCase() || "LOADING...";
+
+  const [todayReminders, setTodayReminders] = useState<any[]>([]);
+  const [completedCount, setCompletedCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  // Check if a reminder is for today
+  const isReminderForToday = (reminder: any): boolean => {
+    const today = new Date();
+    const todayStr = today.toDateString();
+    const dayName = WEEK_DAYS[today.getDay()];
+
+    if (reminder.repeatOption === 'Daily') return true;
+    if (reminder.repeatOption === 'Weekly' && reminder.selectedDays?.includes(dayName)) return true;
+    if (reminder.repeatOption === 'Once') {
+      const reminderDate = new Date(reminder.date);
+      return reminderDate.toDateString() === todayStr;
+    }
+    return false;
+  };
+
+  // Check if reminder is completed today
+  const isCompletedToday = (reminder: any): boolean => {
+    const todayStr = new Date().toDateString();
+    const completedDates = reminder.completedDates || [];
+    return completedDates.includes(todayStr) || reminder.status === 'Completed';
+  };
+
+  // Load today's reminders + completion count
+  useEffect(() => {
+    if (!effectiveUserId) return;
+
+    const remindersRef = collection(db, 'users', effectiveUserId, 'reminders');
+    const q = query(remindersRef, orderBy('time', 'asc'));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const today = new Date();
+      const todayStr = today.toDateString();
+
+      const todayList: any[] = [];
+      let completed = 0;
+
+      snapshot.docs.forEach(doc => {
+        const r = { id: doc.id, ...doc.data() };
+
+        if (isReminderForToday(r)) {
+          todayList.push(r);
+          if (isCompletedToday(r)) {
+            completed++;
+          }
+        }
+      });
+
+      setTodayReminders(todayList);
+      setCompletedCount(completed);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [effectiveUserId]);
 
   const handleShare = async () => {
-  const shareCode = auth.currentUser?.uid.slice(0, 12).toUpperCase();
-
-  await Share.share({
-    message: `Hi! Please take care of me on Elderly Care app.\nMy code: ${shareCode}`,
-    url: `https://elderlycare.app/link/${auth.currentUser?.uid}`,   
-    title: "Connect with Me",
-  });
-};
+    await Share.share({
+      message: `Hi! Please take care of me on Elderly Care app.\nMy code: ${shareCode}`,
+      url: `https://elderlycare.app/link/${effectiveUserId}`,
+      title: "Connect with Me",
+    });
+  };
 
   return (
     <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
@@ -239,12 +297,12 @@ const ElderlyDashboard = ({ userName }: { userName: string }) => {
         </TouchableOpacity>
       </View>
 
+      {/* Share Code Card */}
       <Card style={{ marginHorizontal: 20, marginTop: 20, padding: 20 }}>
         <Text style={styles.cardTitle}>Invite Your Caregiver</Text>
         <Text style={{ color: COLORS.gray, marginVertical: 10, fontSize: 15 }}>
           Share this code with your caregiver:
         </Text>
-
         <View style={{
           flexDirection: 'row',
           backgroundColor: '#f0f0f0',
@@ -253,70 +311,103 @@ const ElderlyDashboard = ({ userName }: { userName: string }) => {
           alignItems: 'center',
           justifyContent: 'space-between'
         }}>
-          <Text style={{
-            fontSize: 26,
-            fontWeight: 'bold',
-            letterSpacing: 5,
-            color: COLORS.primaryBlue
-          }}>
+          <Text style={{ fontSize: 26, fontWeight: 'bold', letterSpacing: 5, color: COLORS.primaryBlue }}>
             {shareCode}
           </Text>
-
-          <TouchableOpacity
-            onPress={handleShare}
-            style={{
-              backgroundColor: COLORS.primaryBlue,
-              width: 50,
-              height: 50,
-              borderRadius: 25,
-              justifyContent: 'center',
-              alignItems: 'center'
-            }}
-          >
+          <TouchableOpacity onPress={handleShare} style={{
+            backgroundColor: COLORS.primaryBlue,
+            width: 50, height: 50, borderRadius: 25,
+            justifyContent: 'center', alignItems: 'center'
+          }}>
             <Ionicons name="share-social" size={28} color="white" />
           </TouchableOpacity>
         </View>
       </Card>
 
+      {/* Goals for Today */}
       <Card style={{ marginTop: 20 }}>
         <Text style={styles.cardTitle}>Goals for Today</Text>
-        <View style={styles.goalItem}>
-          <Ionicons name="medkit-outline" size={24} color={COLORS.primaryBlue} />
-          <View style={styles.goalText}>
-            <Text style={styles.goalTitle}>Medications Taken</Text>
-            <Text style={styles.goalSubtitle}>3 of 4 completed</Text>
-          </View>
-        </View>
-        <View style={styles.progressBarContainer}>
-          <View style={[styles.progressBar, { width: '75%' }]} />
-        </View>
 
-        <View style={styles.goalItem}>
-          <Ionicons name="walk-outline" size={24} color={COLORS.primaryBlue} />
-          <View style={styles.goalText}>
-            <Text style={styles.goalTitle}>Morning Walk</Text>
-            <Text style={styles.goalSubtitle}>15 of 30 minutes</Text>
-          </View>
-        </View>
-        <View style={styles.progressBarContainer}>
-          <View style={[styles.progressBar, { width: '50%' }]} />
-        </View>
+        {loading ? (
+          <ActivityIndicator style={{ marginTop: 20 }} color={COLORS.primaryBlue} />
+        ) : todayReminders.length === 0 ? (
+          <Text style={{ color: COLORS.gray, textAlign: 'center', marginTop: 20, fontSize: 16 }}>
+            No reminders for today
+          </Text>
+        ) : (
+          <>
+            <View style={styles.goalItem}>
+              <Ionicons name="checkmark-circle-outline" size={28} color={COLORS.primaryBlue} />
+              <View style={styles.goalText}>
+                <Text style={styles.goalTitle}>Tasks Completed</Text>
+                <Text style={styles.goalSubtitle}>
+                  {completedCount} of {todayReminders.length} completed
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.progressBarContainer}>
+              <View style={[
+                styles.progressBar,
+                {
+                  width: `${(completedCount / todayReminders.length) * 100}%`,
+                  backgroundColor: completedCount === todayReminders.length ? COLORS.green : COLORS.primaryBlue
+                }
+              ]} />
+            </View>
+
+            {/* List today's reminders */}
+            <View style={{ marginTop: 15 }}>
+              {todayReminders.map((reminder, index) => (
+                <View key={reminder.id} style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 6 }}>
+                  <Ionicons
+                    name={isCompletedToday(reminder) ? "checkmark-circle" : "radio-button-off"}
+                    size={22}
+                    color={isCompletedToday(reminder) ? COLORS.green : COLORS.gray}
+                  />
+                  <Text style={{
+                    marginLeft: 10,
+                    fontSize: 15,
+                    color: isCompletedToday(reminder) ? COLORS.gray : COLORS.black,
+                    textDecorationLine: isCompletedToday(reminder) ? 'line-through' : 'none'
+                  }}>
+                    {reminder.title} • {reminder.time}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </>
+        )}
       </Card>
 
+      {/* Next Reminder */}
       <Card style={[styles.nextReminderCard, { marginTop: 20 }]}>
-        <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>Next Reminder</Text>
-        <View style={styles.reminderItem}>
-          <Ionicons name="time-outline" size={24} color={COLORS.white} />
-          <View style={styles.reminderText}>
-            <Text style={styles.reminderTitle}>Lunch with Diana</Text>
-            <Text style={styles.reminderTime}>1:00 PM</Text>
+        <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>
+          Next Reminder
+        </Text>
+        {loading ? (
+          <ActivityIndicator color={COLORS.white} />
+        ) : todayReminders.length === 0 || completedCount === todayReminders.length ? (
+          <Text style={{ color: COLORS.lightBlue, fontSize: 16 }}>
+            All tasks completed today!
+          </Text>
+        ) : (
+          <View style={styles.reminderItem}>
+            <Ionicons name="time-outline" size={24} color={COLORS.white} />
+            <View style={styles.reminderText}>
+              <Text style={styles.reminderTitle}>
+                {todayReminders.find(r => !isCompletedToday(r))?.title || "No pending"}
+              </Text>
+              <Text style={styles.reminderTime}>
+                {todayReminders.find(r => !isCompletedToday(r))?.time || "--:--"}
+              </Text>
+            </View>
           </View>
-        </View>
+        )}
       </Card>
     </ScrollView>
   );
 };
-
 
 const CaregiverDashboard = ({ userProfile, elderlyProfile }: { 
   userProfile: UserProfile, 
@@ -327,7 +418,7 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile }: {
   const isLinked = !!userProfile.linkedElderlyId;
   const elderlyName = elderlyProfile ? elderlyProfile.name : "No Elderly Linked";
 
-  // If linked but profile hasn't loaded (i.e., we are in the "Connecting..." state)
+  // If linked but profile hasn't loaded
   if (isLinked && !elderlyProfile) {
     return (
       <View style={styles.screenContainer}>
@@ -370,44 +461,22 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile }: {
           </Text>
         </TouchableOpacity>
       ) : (
-        <TouchableOpacity
-          style={{ alignSelf: 'center', margin: 15, padding: 10 }}
-          onPress={() => router.push('/link-elderly')}
-        >
-          <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 15 }}>
-            Change Linked Elderly
-          </Text>
-        </TouchableOpacity>
-      )}
+        <>
+          <TouchableOpacity
+            style={{ alignSelf: 'center', margin: 15, padding: 10 }}
+            onPress={() => router.push('/link-elderly')}
+          >
+            <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 15 }}>
+              Change Linked Elderly
+            </Text>
+          </TouchableOpacity>
 
-      <Card>
-      <Text style={styles.cardTitle}>Today's Status</Text>
-      <Text style={styles.cardSubtitle}>Last updated: 9:00 AM</Text>
-      <View style={styles.statusContainer}>
-        <View style={styles.statusBox}>
-          <Text style={styles.statusValue}>3/4</Text>
-          <Text style={styles.statusLabel}>Medications</Text>
-        </View>
-        <View style={styles.statusDivider} />
-        <View style={styles.statusBox}>
-          <Text style={styles.statusValue}>1/2</Text>
-          <Text style={styles.statusLabel}>Activities</Text>
-        </View>
-        <View style={styles.allWellBadge}>
-          <Text style={styles.allWellText}>All Well</Text>
-        </View>
-      </View>
-    </Card>
-    <Card>
-      <Text style={styles.cardTitle}>Today's Tasks</Text>
-      <TaskItem icon="pill" title="Heart Medication" time="10:00 AM (Daily)" status="Completed" statusColor={COLORS.green} />
-      <View style={styles.divider} />
-      <TaskItem icon="food-apple-outline" title="Lunch with Diana" time="1:00 PM" status="Pending" statusColor={COLORS.pending} />
-      <View style={styles.divider} />
-      <TaskItem icon="pill" title="Evening Medication" time="8:00 PM" status="Pending" statusColor={COLORS.pending} />
-    </Card>
-  </ScrollView>
-);
+          {/* Render Elderly's Dynamic Dashboard */}
+          <ElderlyDashboard userName={elderlyName} targetUserId={userProfile.linkedElderlyId} />
+        </>
+      )}
+    </ScrollView>
+  );
 };
 const RemindersScreen = () => {
   const navigation = useNavigation();
@@ -605,55 +674,62 @@ const RemindersScreen = () => {
     });
   };
 
-  const handleDeleteReminder = async (reminder: any) => {
-    Alert.alert(
-      'Delete Reminder',
-      'Are you sure you want to delete this reminder?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const currentUser = auth.currentUser;
-              if (!currentUser) return;
+ const handleDeleteReminder = async (reminder: any) => {
+  Alert.alert(
+    'Delete Reminder',
+    'Are you sure you want to delete this reminder?\nThis will remove it for both you and your linked partner.',
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            const currentUser = auth.currentUser;
+            if (!currentUser) return;
 
-              const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
-              await deleteDoc(reminderRef);
+            const myReminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
+            await deleteDoc(myReminderRef);
 
-              // Delete from linked user's collection too
-              const userProfileRef = doc(db, 'users', currentUser.uid);
-              const userProfileSnap = await getDoc(userProfileRef);
-              
-              if (userProfileSnap.exists()) {
-                const userProfile = userProfileSnap.data();
-                const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
-                
-                if (linkedUserId) {
-                  const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
-                  const linkedSnapshot = await getDocs(linkedRemindersRef);
-                  
-                  linkedSnapshot.docs.forEach(async (docSnap) => {
-                    const data = docSnap.data();
-                    if (data.createdBy === reminder.createdBy && data.title === reminder.title && data.date === reminder.date) {
-                      await deleteDoc(doc(db, 'users', linkedUserId, 'reminders', docSnap.id));
-                    }
-                  });
-                }
+            // Find linked user
+            const profileSnap = await getDoc(doc(db, 'users', currentUser.uid));
+            if (profileSnap.exists()) {
+              const linkedId = profileSnap.data().linkedElderlyId || profileSnap.data().linkedCaregiverId;
+              if (linkedId) {
+                // Find the same reminder in linked user's collection
+                const linkedRemindersRef = collection(db, 'users', linkedId, 'reminders');
+                const q = query(linkedRemindersRef);
+                const snapshot = await getDocs(q);
+
+                const deletePromises = snapshot.docs
+                  .filter(doc => {
+                    const data = doc.data();
+                    // Match by original reminder's Firestore ID or by content
+                    return data.originalReminderId === reminder.id || 
+                           (data.title === reminder.title && 
+                            data.time === reminder.time && 
+                            data.date === reminder.date);
+                  })
+                  .map(doc => deleteDoc(doc.ref));
+
+                await Promise.all(deletePromises);
               }
-
-              Alert.alert('Success', 'Reminder deleted!');
-              loadReminders();
-            } catch (error: any) {
-              console.error('Error deleting reminder:', error);
-              Alert.alert('Error', `Failed to delete reminder: ${error.message}`);
             }
-          },
+
+            Alert.alert('Success', 'Reminder deleted successfully!');
+            
+            // Re-fetch fresh data
+            loadReminders();
+
+          } catch (error: any) {
+            console.error("Delete failed:", error);
+            Alert.alert('Error', 'Failed to delete reminder: ' + error.message);
+          }
         },
-      ]
-    );
-  };
+      },
+    ]
+  );
+};
 
   const changeMonth = (increment: number) => {
     const newDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + increment, 1);
@@ -821,7 +897,7 @@ const AssistantScreen = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [showSidebar, setShowSidebar] = useState(false);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
-  const [chatSessions, setChatSessions] = useState<Array<{id: string, title: string, lastMessage: string, timestamp: Date}>>([]);
+  const [chatSessions, setChatSessions] = useState<{id: string, title: string, lastMessage: string, timestamp: Date}[]>([]);
 
   const AI_USER = { _id: 2, name: 'AI Assistant', avatar: 'https://placehold.co/40x40/007AFF/FFFFFF?text=AI' };
 
