@@ -14,6 +14,7 @@ import {
   Image,
   KeyboardAvoidingView,
   LayoutAnimation,
+  Modal,
   Platform,
   ScrollView,
   Share,
@@ -38,13 +39,6 @@ import {
 } from 'firebase/auth';
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 
-// Canvas variables
-declare const __app_id: string;
-declare const __firebase_config: string;
-
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-
 type UserRole = 'elderly' | 'caregiver';
 type UserProfile = {
   name: string;
@@ -58,7 +52,6 @@ type UserProfile = {
 };
 
 // Colors & Constants
-const { width } = Dimensions.get('window');
 const COLORS = {
   primaryBlue: '#007AFF',
   darkBlue: '#004AAD',
@@ -114,9 +107,15 @@ const TaskItem = ({
       <Text style={styles.taskTime}>{time}</Text>
     </View>
     {status && (
-      <TouchableOpacity onPress={onStatusPress}>
-        <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>
-      </TouchableOpacity>
+      onStatusPress ? (
+        <TouchableOpacity onPress={onStatusPress}>
+          <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>
+        </TouchableOpacity>
+      ) : (
+        <View pointerEvents="none">
+          <Text style={[styles.taskStatus, { color: statusColor }]}>{status}</Text>
+        </View>
+      )
     )}
     <View style={styles.taskActions}>
       {onEdit && (
@@ -164,7 +163,6 @@ const handleAuth = async () => {
       // SIGN UP
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
-      console.log("New user UID:", user.uid);
 
       await setDoc(doc(db, 'users', user.uid), {
         name,
@@ -293,12 +291,20 @@ const handleAuth = async () => {
           )}
 
           <TouchableOpacity style={styles.authButton} onPress={handleAuth} disabled={loading}>
-            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.authButtonText}>{isLogin ? 'Log In' : 'Sign Up'}</Text>}
+            {loading ? <ActivityIndicator color="#fff" /> : <Text style={[styles.authButtonText]}>{isLogin ? 'Log In' : 'Sign Up'}</Text>}
           </TouchableOpacity>
 
           <TouchableOpacity onPress={() => setIsLogin(!isLogin)} style={{ marginTop: 20 }}>
-            <Text style={styles.switchText}>
-              {isLogin ? "Don't have an account? Sign Up" : 'Already have an account? Log In'}
+            <Text style={{ fontSize: 15, textAlign: 'center', color: COLORS.black }}>
+              {isLogin ? (
+                <>
+                  Don't have an account? <Text style={{ color: COLORS.primaryBlue, fontWeight: '600' }}>Sign Up</Text>
+                </>
+              ) : (
+                <>
+                  Already have an account? <Text style={{ color: COLORS.primaryBlue, fontWeight: '600' }}>Log In</Text>
+                </>
+              )}
             </Text>
           </TouchableOpacity>
         </ScrollView>
@@ -308,117 +314,298 @@ const handleAuth = async () => {
 };
 
 //  screens 
-const ElderlyDashboard = ({ userName }: { userName: string }) => {
-  const currentUser = auth.currentUser;
-  const shareCode = currentUser?.uid?.slice(0, 12).toUpperCase() || "LOADING...";
+const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAlertPress: () => void }) => {
+  const [reminders, setReminders] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  const handleShare = async () => {
-  const shareCode = auth.currentUser?.uid.slice(0, 12).toUpperCase();
+  const loadReminders = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        setLoading(false);
+        return;
+      }
 
-  await Share.share({
-    message: `Hi! Please take care of me on Elderly Care app.\nMy code: ${shareCode}`,
-    url: `https://elderlycare.app/link/${auth.currentUser?.uid}`,   
-    title: "Connect with Me",
-  });
-};
+      const remindersRef = collection(db, 'users', currentUser.uid, 'reminders');
+      const q = query(remindersRef, orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+
+      const loadedReminders = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      setReminders(loadedReminders);
+      setLoading(false);
+    } catch (error) {
+      console.error('Error loading reminders:', error);
+      setLoading(false);
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      loadReminders();
+    }, [])
+  );
+
+  const getTodaysReminders = () => {
+    const today = new Date();
+    const dateString = today.toDateString();
+    
+    return reminders.filter(reminder => {
+      if (reminder.repeatOption === 'Daily') {
+        return true;
+      } else if (reminder.repeatOption === 'Weekly') {
+        const dayName = WEEK_DAYS[today.getDay()];
+        return reminder.selectedDays?.includes(dayName);
+      } else if (reminder.repeatOption === 'Once') {
+        const reminderDate = new Date(reminder.date);
+        return reminderDate.toDateString() === today.toDateString();
+      }
+      return false;
+    }).map(reminder => {
+      if (reminder.repeatOption === 'Daily' || reminder.repeatOption === 'Weekly') {
+        const completedDates = reminder.completedDates || [];
+        const status = completedDates.includes(dateString) ? 'Completed' : 'Pending';
+        return { ...reminder, status, currentDateString: dateString };
+      }
+      return { ...reminder, currentDateString: dateString };
+    }).sort((a, b) => {
+      // Sort by time in ascending order
+      const timeA = a.time || '00:00';
+      const timeB = b.time || '00:00';
+      return timeA.localeCompare(timeB);
+    });
+  };
+
+  const getNextTask = () => {
+    const now = new Date();
+    const currentTime = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    const todaysReminders = getTodaysReminders();
+    const pendingReminders = todaysReminders.filter(r => r.status !== 'Completed');
+    
+    // Find the next reminder that hasn't happened yet
+    const nextReminder = pendingReminders.find(r => {
+      const reminderTime = r.time || '00:00';
+      return reminderTime >= currentTime;
+    });
+    
+    // If all reminders have passed, return the first pending one
+    return nextReminder || pendingReminders[0] || null;
+  };
+
+  const handleToggleStatus = async (reminder: any) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+
+      const dateString = reminder.currentDateString || new Date().toDateString();
+      
+      if (reminder.repeatOption === 'Daily' || reminder.repeatOption === 'Weekly') {
+        const completedDates = reminder.completedDates || [];
+        const isCompleted = completedDates.includes(dateString);
+        
+        let updatedCompletedDates;
+        if (isCompleted) {
+          updatedCompletedDates = completedDates.filter((d: string) => d !== dateString);
+        } else {
+          updatedCompletedDates = [...completedDates, dateString];
+        }
+
+        const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
+        await updateDoc(reminderRef, { completedDates: updatedCompletedDates });
+
+        // Update in linked user's collection
+        const userProfileRef = doc(db, 'users', currentUser.uid);
+        const userProfileSnap = await getDoc(userProfileRef);
+        
+        if (userProfileSnap.exists()) {
+          const userProfile = userProfileSnap.data();
+          const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+          
+          if (linkedUserId) {
+            const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+            const linkedSnapshot = await getDocs(linkedRemindersRef);
+            
+            linkedSnapshot.docs.forEach(async (docSnap) => {
+              const data = docSnap.data();
+              if (data.createdBy === reminder.createdBy && data.title === reminder.title && data.date === reminder.date) {
+                await updateDoc(doc(db, 'users', linkedUserId, 'reminders', docSnap.id), { completedDates: updatedCompletedDates });
+              }
+            });
+          }
+        }
+      } else {
+        const newStatus = reminder.status === 'Pending' ? 'Completed' : 'Pending';
+        
+        const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
+        await updateDoc(reminderRef, { status: newStatus });
+
+        const userProfileRef = doc(db, 'users', currentUser.uid);
+        const userProfileSnap = await getDoc(userProfileRef);
+        
+        if (userProfileSnap.exists()) {
+          const userProfile = userProfileSnap.data();
+          const linkedUserId = userProfile.linkedElderlyId || userProfile.linkedCaregiverId;
+          
+          if (linkedUserId) {
+            const linkedRemindersRef = collection(db, 'users', linkedUserId, 'reminders');
+            const linkedSnapshot = await getDocs(linkedRemindersRef);
+            
+            linkedSnapshot.docs.forEach(async (docSnap) => {
+              const data = docSnap.data();
+              if (data.createdBy === reminder.createdBy && data.title === reminder.title && data.date === reminder.date) {
+                await updateDoc(doc(db, 'users', linkedUserId, 'reminders', docSnap.id), { status: newStatus });
+              }
+            });
+          }
+        }
+      }
+
+      await loadReminders();
+      setRefreshKey(prev => prev + 1);
+    } catch (error: any) {
+      console.error('Error updating reminder:', error);
+      Alert.alert('Error', `Failed to update reminder: ${error.message}`);
+    }
+  };
+
+  const todaysReminders = getTodaysReminders();
+  const completedCount = todaysReminders.filter(r => r.status === 'Completed').length;
+  const totalCount = todaysReminders.length;
+  const nextTask = getNextTask();
 
   return (
     <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Hello, {userName}</Text>
-        <TouchableOpacity>
-          <Ionicons name="mic-outline" size={30} color={COLORS.primaryBlue} />
+        <TouchableOpacity onPress={onAlertPress}>
+          <Ionicons name="notifications-outline" size={28} color={COLORS.primaryBlue} />
         </TouchableOpacity>
       </View>
 
-      <Card style={{ marginHorizontal: 20, marginTop: 20, padding: 20 }}>
-        <Text style={styles.cardTitle}>Invite Your Caregiver</Text>
-        <Text style={{ color: COLORS.gray, marginVertical: 10, fontSize: 15 }}>
-          Share this code with your caregiver:
-        </Text>
-
-        <View style={{
-          flexDirection: 'row',
-          backgroundColor: '#f0f0f0',
-          padding: 18,
-          borderRadius: 15,
-          alignItems: 'center',
-          justifyContent: 'space-between'
-        }}>
-          <Text style={{
-            fontSize: 26,
-            fontWeight: 'bold',
-            letterSpacing: 5,
-            color: COLORS.primaryBlue
-          }}>
-            {shareCode}
-          </Text>
-
-          <TouchableOpacity
-            onPress={handleShare}
-            style={{
-              backgroundColor: COLORS.primaryBlue,
-              width: 50,
-              height: 50,
-              borderRadius: 25,
-              justifyContent: 'center',
-              alignItems: 'center'
-            }}
-          >
-            <Ionicons name="share-social" size={28} color="white" />
-          </TouchableOpacity>
-        </View>
-      </Card>
-
       <Card style={{ marginTop: 20 }}>
-        <Text style={styles.cardTitle}>Goals for Today</Text>
-        <View style={styles.goalItem}>
-          <Ionicons name="medkit-outline" size={24} color={COLORS.primaryBlue} />
-          <View style={styles.goalText}>
-            <Text style={styles.goalTitle}>Medications Taken</Text>
-            <Text style={styles.goalSubtitle}>3 of 4 completed</Text>
+        <Text style={styles.cardTitle}>Today's Reminders</Text>
+        <Text style={styles.cardSubtitle}>Last updated: {new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</Text>
+        <View style={styles.statusContainer}>
+          <View style={styles.statusBox}>
+            <Text style={styles.statusValue}>{completedCount}/{totalCount}</Text>
+            <Text style={styles.statusLabel}>Completed</Text>
           </View>
-        </View>
-        <View style={styles.progressBarContainer}>
-          <View style={[styles.progressBar, { width: '75%' }]} />
-        </View>
-
-        <View style={styles.goalItem}>
-          <Ionicons name="walk-outline" size={24} color={COLORS.primaryBlue} />
-          <View style={styles.goalText}>
-            <Text style={styles.goalTitle}>Morning Walk</Text>
-            <Text style={styles.goalSubtitle}>15 of 30 minutes</Text>
+          <View style={styles.allWellBadge}>
+            <Text style={styles.allWellText}>{completedCount === totalCount && totalCount > 0 ? 'All Done' : 'In Progress'}</Text>
           </View>
-        </View>
-        <View style={styles.progressBarContainer}>
-          <View style={[styles.progressBar, { width: '50%' }]} />
         </View>
       </Card>
 
-      <Card style={[styles.nextReminderCard, { marginTop: 20 }]}>
-        <Text style={[styles.cardTitle, { color: COLORS.white, marginBottom: 15 }]}>Next Reminder</Text>
-        <View style={styles.reminderItem}>
-          <Ionicons name="time-outline" size={24} color={COLORS.white} />
-          <View style={styles.reminderText}>
-            <Text style={styles.reminderTitle}>Lunch with Diana</Text>
-            <Text style={styles.reminderTime}>1:00 PM</Text>
-          </View>
-        </View>
+      <Card style={{ marginTop: 20 }} key={refreshKey}>
+        <Text style={styles.cardTitle}>Next Task</Text>
+        {loading ? (
+          <ActivityIndicator size="small" color={COLORS.primaryBlue} style={{ padding: 20 }} />
+        ) : !nextTask ? (
+          <Text style={{ color: COLORS.gray, textAlign: 'center', padding: 20 }}>No pending reminders</Text>
+        ) : (
+          <TaskItem 
+            icon={nextTask.title.toLowerCase().includes('medic') ? 'pill' : 'calendar-outline'} 
+            title={nextTask.title} 
+            time={nextTask.time || '10:00 AM'} 
+            status={nextTask.status || 'Pending'} 
+            statusColor={nextTask.status === 'Completed' ? COLORS.green : COLORS.pending}
+            onStatusPress={() => handleToggleStatus(nextTask)}
+          />
+        )}
       </Card>
     </ScrollView>
   );
 };
 
 
-const CaregiverDashboard = ({ userProfile, elderlyProfile }: { 
+const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: { 
   userProfile: UserProfile, 
-  elderlyProfile: UserProfile | null 
+  elderlyProfile: UserProfile | null,
+  onAlertPress: () => void 
 }) => {
   const router = useRouter();
+  const [reminders, setReminders] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const isLinked = !!userProfile.linkedElderlyId;
   const elderlyName = elderlyProfile ? elderlyProfile.name : "No Elderly Linked";
+
+  const loadReminders = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser || !userProfile.linkedElderlyId) {
+        setLoading(false);
+        return;
+      }
+
+      const remindersRef = collection(db, 'users', userProfile.linkedElderlyId, 'reminders');
+      const q = query(remindersRef, orderBy('createdAt', 'desc'));
+      const snapshot = await getDocs(q);
+
+      const loadedReminders = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      setReminders(loadedReminders);
+      setLoading(false);
+    } catch (error) {
+      console.error('Error loading reminders:', error);
+      setLoading(false);
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      loadReminders();
+    }, [userProfile.linkedElderlyId])
+  );
+
+  const getTodaysReminders = () => {
+    const today = new Date();
+    const dateString = today.toDateString();
+    
+    return reminders.filter(reminder => {
+      if (reminder.repeatOption === 'Daily') {
+        return true;
+      } else if (reminder.repeatOption === 'Weekly') {
+        const dayName = WEEK_DAYS[today.getDay()];
+        return reminder.selectedDays?.includes(dayName);
+      } else if (reminder.repeatOption === 'Once') {
+        const reminderDate = new Date(reminder.date);
+        return reminderDate.toDateString() === today.toDateString();
+      }
+      return false;
+    }).map(reminder => {
+      if (reminder.repeatOption === 'Daily' || reminder.repeatOption === 'Weekly') {
+        const completedDates = reminder.completedDates || [];
+        const status = completedDates.includes(dateString) ? 'Completed' : 'Pending';
+        return { ...reminder, status, currentDateString: dateString };
+      }
+      return { ...reminder, currentDateString: dateString };
+    }).sort((a, b) => {
+      // Sort by time in ascending order
+      const timeA = a.time || '00:00';
+      const timeB = b.time || '00:00';
+      return timeA.localeCompare(timeB);
+    });
+  };
+
+  const getCompletedTasks = () => {
+    const todaysReminders = getTodaysReminders();
+    return todaysReminders.filter(r => r.status === 'Completed');
+  };
+
+  const todaysReminders = getTodaysReminders();
+  const completedCount = todaysReminders.filter(r => r.status === 'Completed').length;
+  const totalCount = todaysReminders.length;
+  const completedTasks = getCompletedTasks();
 
   // If linked but profile hasn't loaded (i.e., we are in the "Connecting..." state)
   if (isLinked && !elderlyProfile) {
@@ -436,9 +623,12 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile }: {
     <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>{elderlyName}'s Dashboard</Text>
+        <TouchableOpacity onPress={onAlertPress}>
+          <Ionicons name="notifications-outline" size={26} color={COLORS.primaryBlue} />
+        </TouchableOpacity>
       </View>
 
-      {elderlyName === "No Elderly Linked" || elderlyName.includes("Link") ? (
+      {elderlyName === "No Elderly Linked" || elderlyName.includes("Link") && (
         <TouchableOpacity
           style={{
             backgroundColor: COLORS.lightBlue,
@@ -462,42 +652,41 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile }: {
             Tap here to connect with someone you care for
           </Text>
         </TouchableOpacity>
-      ) : (
-        <TouchableOpacity
-          style={{ alignSelf: 'center', margin: 15, padding: 10 }}
-          onPress={() => router.push('/link-elderly')}
-        >
-          <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 15 }}>
-            Change Linked Elderly
-          </Text>
-        </TouchableOpacity>
       )}
 
       <Card>
       <Text style={styles.cardTitle}>Today's Status</Text>
-      <Text style={styles.cardSubtitle}>Last updated: 9:00 AM</Text>
+      <Text style={styles.cardSubtitle}>Last updated: {new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</Text>
       <View style={styles.statusContainer}>
         <View style={styles.statusBox}>
-          <Text style={styles.statusValue}>3/4</Text>
-          <Text style={styles.statusLabel}>Medications</Text>
-        </View>
-        <View style={styles.statusDivider} />
-        <View style={styles.statusBox}>
-          <Text style={styles.statusValue}>1/2</Text>
-          <Text style={styles.statusLabel}>Activities</Text>
+          <Text style={styles.statusValue}>{completedCount}/{totalCount}</Text>
+          <Text style={styles.statusLabel}>Reminders</Text>
         </View>
         <View style={styles.allWellBadge}>
-          <Text style={styles.allWellText}>All Well</Text>
+          <Text style={styles.allWellText}>{completedCount === totalCount && totalCount > 0 ? 'All Done' : 'In Progress'}</Text>
         </View>
       </View>
     </Card>
-    <Card>
-      <Text style={styles.cardTitle}>Today's Tasks</Text>
-      <TaskItem icon="pill" title="Heart Medication" time="10:00 AM (Daily)" status="Completed" statusColor={COLORS.green} />
-      <View style={styles.divider} />
-      <TaskItem icon="food-apple-outline" title="Lunch with Diana" time="1:00 PM" status="Pending" statusColor={COLORS.pending} />
-      <View style={styles.divider} />
-      <TaskItem icon="pill" title="Evening Medication" time="8:00 PM" status="Pending" statusColor={COLORS.pending} />
+    <Card key={refreshKey}>
+      <Text style={styles.cardTitle}>Completed Tasks</Text>
+      {loading ? (
+        <ActivityIndicator size="small" color={COLORS.primaryBlue} style={{ padding: 20 }} />
+      ) : completedTasks.length === 0 ? (
+        <Text style={{ color: COLORS.gray, textAlign: 'center', padding: 20 }}>No completed tasks yet</Text>
+      ) : (
+        completedTasks.map((reminder, index) => (
+          <View key={reminder.id}>
+            <TaskItem 
+              icon={reminder.title.toLowerCase().includes('medic') ? 'pill' : 'calendar-outline'} 
+              title={reminder.title} 
+              time={reminder.time || '10:00 AM'} 
+              status={reminder.status || 'Pending'} 
+              statusColor={reminder.status === 'Completed' ? COLORS.green : COLORS.pending}
+            />
+            {index < completedTasks.length - 1 && <View style={styles.divider} />}
+          </View>
+        ))
+      )}
     </Card>
   </ScrollView>
 );
@@ -810,7 +999,7 @@ const RemindersScreen = () => {
   <TouchableOpacity
     onPress={() => navigation.navigate('add-reminder')}
   >
-    <Ionicons name="add-circle" size={32} color={COLORS.primaryBlue} />
+    <Ionicons name="add-circle-outline" size={28} color={COLORS.black} />
   </TouchableOpacity>
      </View>
 
@@ -870,39 +1059,299 @@ const RemindersScreen = () => {
   );
 };
 
-const ElderlyAlerts = () => (
-  <View style={styles.screenContainer}>
-    <View style={styles.header}>
-      <Text style={styles.headerTitle}>Alert</Text>
-    </View>
-    <View style={styles.sosContainer}>
-      <TouchableOpacity style={styles.sosButton} activeOpacity={0.7}>
-        <Text style={styles.sosText}>SOS</Text>
-      </TouchableOpacity>
-    </View>
-  </View>
-);
+const ProfileScreen = ({ userProfile }: { userProfile: UserProfile }) => {
+  const router = useRouter();
+  const [isEditing, setIsEditing] = useState(false);
+  const [name, setName] = useState(userProfile.name);
+  const [gender, setGender] = useState(userProfile.gender || 'Male');
+  const [dateOfBirth, setDateOfBirth] = useState(userProfile.dateOfBirth || '');
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [saving, setSaving] = useState(false);
 
-const CaregiverAlerts = () => (
-  <View style={styles.screenContainer}>
-    <View style={styles.header}>
-      <Text style={styles.headerTitle}>Alerts Log</Text>
-    </View>
-    <View style={styles.alertLogContainer}>
-      <View style={styles.alertCard}>
-        <Ionicons name="warning" size={24} color={COLORS.red} />
-        <View style={styles.alertTextContainer}>
-          <Text style={styles.alertTitle}>SOS Button Pressed</Text>
-          <Text style={styles.alertTime}>October 10, 8:20 PM</Text>
-          <View style={styles.locationContainer}>
-            <Ionicons name="location-sharp" size={16} color={COLORS.gray} />
-            <Text style={styles.alertLocation}>Location: 123 Maple St.</Text>
-          </View>
+  const handleSaveProfile = async () => {
+    setSaving(true);
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+
+      await setDoc(doc(db, 'users', currentUser.uid), {
+        ...userProfile,
+        name,
+        gender,
+        dateOfBirth,
+      }, { merge: true });
+
+      Alert.alert('Success', 'Profile updated successfully!');
+      setIsEditing(false);
+    } catch (error: any) {
+      Alert.alert('Error', `Failed to update profile: ${error.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSignOut = () => {
+    Alert.alert(
+      'Sign Out',
+      'Are you sure you want to sign out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Sign Out',
+          style: 'destructive',
+          onPress: () => signOut(auth),
+        },
+      ]
+    );
+  };
+
+  return (
+    <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 30 }}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Profile</Text>
+        {!isEditing ? (
+          <TouchableOpacity onPress={() => setIsEditing(true)}>
+            <Ionicons name="create-outline" size={26} color={COLORS.black} />
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity onPress={() => setIsEditing(false)}>
+            <Ionicons name="close" size={28} color={COLORS.red} />
+          </TouchableOpacity>
+        )}
+      </View>
+
+      <View style={{ alignItems: 'center', marginTop: 20 }}>
+        <View style={{
+          width: 100,
+          height: 100,
+          borderRadius: 50,
+          backgroundColor: COLORS.primaryBlue,
+          justifyContent: 'center',
+          alignItems: 'center',
+          marginBottom: 15,
+        }}>
+          <Text style={{ fontSize: 40, fontWeight: 'bold', color: COLORS.white }}>
+            {userProfile.name.charAt(0).toUpperCase()}
+          </Text>
+        </View>
+        {!isEditing && (
+          <Text style={{ fontSize: 24, fontWeight: 'bold', color: COLORS.black }}>
+            {userProfile.name}
+          </Text>
+        )}
+        <Text style={{ fontSize: 16, color: COLORS.gray, marginTop: 5 }}>
+          {userProfile.role === 'elderly' ? 'Elderly User' : 'Caregiver'}
+        </Text>
+      </View>
+
+      <View style={{ marginHorizontal: 20, marginTop: 30 }}>
+        <View style={styles.profileField}>
+          <Text style={styles.profileLabel}>Name</Text>
+          {isEditing ? (
+            <TextInput
+              style={styles.profileInput}
+              value={name}
+              onChangeText={setName}
+              placeholder="Your Name"
+            />
+          ) : (
+            <Text style={styles.profileValue}>{userProfile.name}</Text>
+          )}
+        </View>
+
+        <View style={styles.profileField}>
+          <Text style={styles.profileLabel}>Email</Text>
+          <Text style={styles.profileValue}>{userProfile.email}</Text>
+        </View>
+
+        <View style={styles.profileField}>
+          <Text style={styles.profileLabel}>Gender</Text>
+          {isEditing ? (
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
+              <TouchableOpacity
+                style={[styles.genderBtn, { flex: 1 }, gender === 'Male' && styles.genderActive]}
+                onPress={() => setGender('Male')}
+              >
+                <Ionicons name="male" size={20} color={gender === 'Male' ? COLORS.white : COLORS.gray} />
+                <Text style={gender === 'Male' ? styles.genderTextActive : styles.genderText}>Male</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.genderBtn, { flex: 1 }, gender === 'Female' && styles.genderActive]}
+                onPress={() => setGender('Female')}
+              >
+                <Ionicons name="female" size={20} color={gender === 'Female' ? COLORS.white : COLORS.gray} />
+                <Text style={gender === 'Female' ? styles.genderTextActive : styles.genderText}>Female</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <Text style={styles.profileValue}>{userProfile.gender || 'Not set'}</Text>
+          )}
+        </View>
+
+        <View style={styles.profileField}>
+          <Text style={styles.profileLabel}>Date of Birth</Text>
+          {isEditing ? (
+            <>
+              <TouchableOpacity
+                style={styles.dobButton}
+                onPress={() => setShowDatePicker(true)}
+              >
+                <Text style={styles.dobText}>{dateOfBirth || 'Select Date'}</Text>
+                <Ionicons name="calendar-outline" size={20} color={COLORS.primaryBlue} />
+              </TouchableOpacity>
+              {showDatePicker && (
+                <DateTimePicker
+                  value={dateOfBirth ? new Date(dateOfBirth) : new Date()}
+                  mode="date"
+                  display="default"
+                  maximumDate={new Date()}
+                  onChange={(event, selectedDate) => {
+                    setShowDatePicker(Platform.OS === 'ios');
+                    if (selectedDate && event.type !== 'dismissed') {
+                      setDateOfBirth(selectedDate.toLocaleDateString('en-US'));
+                    }
+                  }}
+                />
+              )}
+            </>
+          ) : (
+            <Text style={styles.profileValue}>{userProfile.dateOfBirth || 'Not set'}</Text>
+          )}
         </View>
       </View>
-    </View>
-  </View>
-);
+
+      {/* Invite Caregiver for Elderly Users */}
+      {userProfile.role === 'elderly' && auth.currentUser && (
+        <Card style={{ marginHorizontal: 20, marginTop: 20, padding: 20 }}>
+          <Text style={styles.cardTitle}>Invite Your Caregiver</Text>
+          <Text style={{ color: COLORS.gray, marginVertical: 10, fontSize: 15 }}>
+            Share this code with your caregiver:
+          </Text>
+          <View style={{
+            flexDirection: 'row',
+            backgroundColor: '#f0f0f0',
+            padding: 18,
+            borderRadius: 15,
+            alignItems: 'center',
+            justifyContent: 'space-between'
+          }}>
+            <Text style={{
+              fontSize: 26,
+              fontWeight: 'bold',
+              letterSpacing: 5,
+              color: COLORS.primaryBlue
+            }}>
+              {auth.currentUser.uid.slice(0, 12).toUpperCase()}
+            </Text>
+            <TouchableOpacity
+              onPress={async () => {
+                const shareCode = auth.currentUser?.uid.slice(0, 12).toUpperCase();
+                await Share.share({
+                  message: `Hi! Please take care of me on Elderly Care app.\nMy code: ${shareCode}`,
+                  url: `https://elderlycare.app/link/${auth.currentUser?.uid}`,
+                  title: "Connect with Me",
+                });
+              }}
+              style={{
+                backgroundColor: COLORS.primaryBlue,
+                width: 50,
+                height: 50,
+                borderRadius: 25,
+                justifyContent: 'center',
+                alignItems: 'center'
+              }}
+            >
+              <Ionicons name="share-social" size={28} color="white" />
+            </TouchableOpacity>
+          </View>
+        </Card>
+      )}
+
+      {/* Link Elderly for Caregiver Users */}
+      {userProfile.role === 'caregiver' && (
+        <View style={{ marginHorizontal: 20, marginTop: 20 }}>
+          {userProfile.linkedElderlyId ? (
+            <TouchableOpacity
+              style={{
+                backgroundColor: COLORS.lightBlue,
+                padding: 15,
+                borderRadius: 12,
+                alignItems: 'center',
+              }}
+              onPress={() => router.push('/link-elderly')}
+            >
+              <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 15 }}>
+                Change Linked Elderly
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={{
+                backgroundColor: COLORS.lightBlue,
+                padding: 20,
+                borderRadius: 15,
+                alignItems: 'center',
+                shadowColor: '#000',
+                shadowOffset: { width: 0, height: 2 },
+                shadowOpacity: 0.1,
+                shadowRadius: 5,
+                elevation: 5,
+              }}
+              onPress={() => router.push('/link-elderly')}
+            >
+              <Ionicons name="link-outline" size={40} color={COLORS.primaryBlue} />
+              <Text style={{ color: COLORS.primaryBlue, fontWeight: 'bold', fontSize: 18, marginTop: 10 }}>
+                Link to an Elderly User
+              </Text>
+              <Text style={{ color: COLORS.gray, fontSize: 14, marginTop: 5 }}>
+                Tap here to connect with someone you care for
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {isEditing && (
+        <View style={{ marginHorizontal: 20, marginTop: 20 }}>
+          <TouchableOpacity
+            style={{
+              backgroundColor: COLORS.primaryBlue,
+              padding: 15,
+              borderRadius: 12,
+              alignItems: 'center',
+            }}
+            onPress={handleSaveProfile}
+            disabled={saving}
+          >
+            {saving ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={{ color: COLORS.white, fontWeight: 'bold', fontSize: 15 }}>
+                Save Changes
+              </Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
+
+      <View style={{ marginHorizontal: 20, marginTop: 20 }}>
+        <TouchableOpacity
+          style={{
+            backgroundColor: COLORS.red,
+            padding: 15,
+            borderRadius: 12,
+            alignItems: 'center',
+          }}
+          onPress={handleSignOut}
+        >
+          <Text style={{ color: COLORS.white, fontWeight: 'bold', fontSize: 15 }}>
+            Sign Out
+          </Text>
+        </TouchableOpacity>
+      </View>
+    </ScrollView>
+  );
+};
 
 const AssistantScreen = () => {
   const [messages, setMessages] = useState<IMessage[]>([]);
@@ -1089,6 +1538,12 @@ const AssistantScreen = () => {
   };
 
   const handlePickImage = async () => {
+    
+    if (Platform.OS === 'web') {
+      await pickImage(false); 
+      return;
+    }
+
     Alert.alert("Upload Photo", "Choose an option", [
       { text: "Camera", onPress: () => pickImage(true) },
       { text: "Gallery", onPress: () => pickImage(false) },
@@ -1293,7 +1748,7 @@ const AssistantScreen = () => {
     <KeyboardAvoidingView 
       style={styles.screenContainer}
       behavior='padding'
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 78}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 30 : 30}
     >
       {/* Sidebar for chat history */}
       {showSidebar && (
@@ -1447,6 +1902,7 @@ const Tab = createBottomTabNavigator();
 
 const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
   const [elderlyProfile, setElderlyProfile] = useState<UserProfile | null>(null);
+  const [showAlertModal, setShowAlertModal] = useState(false);
 
   useEffect(() => {
     if (userProfile.role === 'caregiver' && userProfile.linkedElderlyId) {
@@ -1475,15 +1931,78 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
     : (elderlyProfile?.name || "No Elderly Linked");
 
   return (
-    <Tab.Navigator
-      screenOptions={{
-        headerShown: false,
-        tabBarActiveTintColor: COLORS.primaryBlue,
-        tabBarInactiveTintColor: COLORS.gray,
-        tabBarStyle: styles.tabBar,
-        tabBarLabelStyle: styles.tabBarLabel,
-      }}
-    >
+    <>
+      <Modal
+        visible={showAlertModal}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setShowAlertModal(false)}
+      >
+        <TouchableOpacity 
+          style={styles.modalOverlay} 
+          activeOpacity={1} 
+          onPress={() => setShowAlertModal(false)}
+        >
+          <TouchableOpacity activeOpacity={1} style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={{ fontSize: 20, fontWeight: 'bold' }}>
+                {userProfile.role === 'elderly' ? 'Emergency Alert' : 'Alerts'}
+              </Text>
+              <TouchableOpacity onPress={() => setShowAlertModal(false)}>
+                <Ionicons name="close" size={28} color={COLORS.black} />
+              </TouchableOpacity>
+            </View>
+            
+            <View style={{ padding: 20 }}>
+              {userProfile.role === 'elderly' ? (
+                <View style={{ alignItems: 'center' }}>
+                  <Text style={{ fontSize: 16, color: COLORS.gray, marginBottom: 30, textAlign: 'center' }}>
+                    Press the button below to send an emergency alert to your caregiver
+                  </Text>
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: COLORS.red,
+                      width: Dimensions.get('window').width * 0.6,
+                      height: Dimensions.get('window').width * 0.6,
+                      borderRadius: Dimensions.get('window').width * 0.3,
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      shadowColor: '#000',
+                      shadowOffset: { width: 0, height: 4 },
+                      shadowOpacity: 0.3,
+                      shadowRadius: 5,
+                      elevation: 8,
+                    }}
+                    onPress={() => {
+                      Alert.alert('SOS Sent!', 'Your caregiver has been notified.');
+                      setShowAlertModal(false);
+                    }}
+                  >
+                    <Text style={{ color: COLORS.white, fontSize: 32, fontWeight: 'bold' }}>SOS</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <Card>
+                  <Text style={styles.cardTitle}>Recent Alerts</Text>
+                  <Text style={{ color: COLORS.gray, marginTop: 10 }}>
+                    No recent alerts from {elderlyProfile?.name || 'elderly user'}
+                  </Text>
+                </Card>
+              )}
+            </View>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+
+      <Tab.Navigator
+        screenOptions={{
+          headerShown: false,
+          tabBarActiveTintColor: COLORS.primaryBlue,
+          tabBarInactiveTintColor: COLORS.gray,
+          tabBarStyle: styles.tabBar,
+          tabBarLabelStyle: styles.tabBarLabel,
+        }}
+      >
       <Tab.Screen 
         name="Dashboard"
         options={{
@@ -1495,10 +2014,12 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
       >
         {() => 
           userProfile.role === 'elderly' 
-            ? <ElderlyDashboard userName={userProfile.name} />
-            : <CaregiverDashboard userProfile={userProfile}       
+            ? <ElderlyDashboard userName={userProfile.name} onAlertPress={() => setShowAlertModal(true)} />
+            : <CaregiverDashboard 
+                userProfile={userProfile}       
                 elderlyProfile={elderlyProfile}
-                />
+                onAlertPress={() => setShowAlertModal(true)}
+              />
         }
       </Tab.Screen>
 
@@ -1530,17 +2051,18 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
         }}
       />
       <Tab.Screen 
-        name="Alerts"
+        name="Profile"
         options={{
-          tabBarLabel: 'Alerts',
+          tabBarLabel: 'Profile',
           tabBarIcon: ({ color, size }) => (
-            <Ionicons name="notifications-outline" size={size} color={color} />
+            <Ionicons name="person-outline" size={size} color={color} />
           ),
         }}
       >
-       {() => userProfile.role === 'elderly' ? <ElderlyAlerts /> : <CaregiverAlerts />}
+        {() => <ProfileScreen userProfile={userProfile} />}
       </Tab.Screen>
     </Tab.Navigator>
+    </>
   );
 };
 
@@ -1622,14 +2144,6 @@ export default function TabsScreen() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: '#fff' }}>
       <StatusBar barStyle="dark-content" />
-      <View style={styles.toggleContainer}>
-        <Text style={styles.toggleLabel}>
-          Logged in as: {userProfile.name} ({userProfile.role.toUpperCase()})
-        </Text>
-        <TouchableOpacity onPress={() => signOut(auth)}>
-          <Text style={{ color: COLORS.red, fontWeight: 'bold' }}>Sign Out</Text>
-        </TouchableOpacity>
-      </View>
       <AppTabs userProfile={userProfile} />
     </SafeAreaView>
   
@@ -1696,6 +2210,16 @@ const styles = StyleSheet.create({
   roleText: { fontSize: 16 },
   roleTextActive: { color: '#fff', 
     fontWeight: 'bold' },
+  authButtonText: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  switchText: {
+    color: COLORS.primaryBlue,
+    fontSize: 15,
+    textAlign: 'center',
+  },
   genderContainer: {
     width: 320,
     marginVertical: 10,
@@ -1747,6 +2271,31 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.black,
   },
+  profileField: {
+    marginBottom: 20,
+  },
+  profileLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.gray,
+    marginBottom: 8,
+  },
+  profileValue: {
+    fontSize: 16,
+    color: COLORS.black,
+    padding: 12,
+    backgroundColor: COLORS.lightGray,
+    borderRadius: 8,
+  },
+  profileInput: {
+    fontSize: 16,
+    color: COLORS.black,
+    padding: 12,
+    backgroundColor: COLORS.white,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.primaryBlue,
+  },
   toggleContainer: { flexDirection: 'row', 
     justifyContent: 'space-between', 
     padding: 15, 
@@ -1762,8 +2311,8 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between', 
     alignItems: 'center', 
     paddingHorizontal: 20, 
-    paddingVertical: 15 },
-  headerTitle: { fontSize: 28, 
+    paddingVertical: 20 },
+  headerTitle: { fontSize: 25, 
   fontWeight: 'bold',
    color: COLORS.black },
   card: { backgroundColor: COLORS.lightGray, 
@@ -1810,7 +2359,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4, 
     paddingHorizontal: 10 },
   allWellText: { color: COLORS.green, fontWeight: '600' },
-  taskItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 20 },
+  taskItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10 },
   taskIconContainer: { width: 40, 
     height: 40, 
     borderRadius: 20, 
@@ -1842,9 +2391,9 @@ const styles = StyleSheet.create({
   selectedDayText: { fontSize: 16, color: COLORS.white, fontWeight: 'bold' },
   tasksHeader: { fontSize: 18, fontWeight: 'bold', margin: 20 },
   sosContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  sosButton: { width: width * 0.6, 
-    height: width * 0.6, 
-    borderRadius: width * 0.3, 
+  sosButton: { width: Dimensions.get('window').width * 0.6, 
+    height: Dimensions.get('window').width * 0.6, 
+    borderRadius: Dimensions.get('window').width * 0.3, 
     backgroundColor: COLORS.sosRed, 
     justifyContent: 'center', 
     alignItems: 'center', 
@@ -1866,7 +2415,7 @@ const styles = StyleSheet.create({
   locationContainer: { flexDirection: 'row', alignItems: 'center', marginTop: 5 },
   alertLocation: { fontSize: 14, color: COLORS.gray, marginLeft: 5 },
   tabBar: { 
-    height: 90, 
+    height: 75, 
     paddingTop: 10,
     paddingBottom: 30, 
     borderTopWidth: 1, 
@@ -2008,5 +2557,24 @@ const styles = StyleSheet.create({
   chatSessionPreview: {
     fontSize: 14,
     color: COLORS.gray,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    maxHeight: '80%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.divider,
   },
 });
