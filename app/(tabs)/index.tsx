@@ -535,7 +535,7 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
       </TouchableOpacity>
 
       <Card style={{ marginTop: 20 }}>
-        <Text style={styles.cardTitle}>Today's Reminders</Text>
+        <Text style={styles.cardTitle}>Today's Status</Text>
         <Text style={styles.cardSubtitle}>Last updated: {new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</Text>
         <View style={styles.statusContainer}>
           <View style={styles.statusBox}>
