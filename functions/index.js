@@ -1,30 +1,27 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 
-// Backend that switches models based on input type
-exports.getAiChatResponse = onCall({ secrets: ["OPENAI_API_KEY"], timeoutSeconds: 60 }, async (request) => {
-  console.log("1. Request received:", JSON.stringify(request.data).substring(0, 100) + "...");
-
-  const geminiKey = process.env.OPENAI_API_KEY;
-  if (!geminiKey) {
-    throw new HttpsError("internal", "Gemini API Key is not configured.");
+// Set higher timeout for large image/audio payloads
+exports.getAiChatResponse = onCall({ 
+  secrets: ["OPENAI_API_KEY"], 
+  timeoutSeconds: 60,
+  region: "us-central1"
+}, async (request) => {
+  
+  // 1. API Key Check (CRITICAL)
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // This is the error that is likely causing the crash if the key is missing
+    console.error("CRITICAL: OPENAI_API_KEY secret is missing or not loaded.");
+    throw new HttpsError("unauthenticated", "Server API Key is not configured.");
   }
 
   const { message, image, audio } = request.data;
 
-  if (!message && !image && !audio) {
-    throw new HttpsError("invalid-argument", "Payload is empty.");
-  }
-
-  let modelName = "gemini-2.5-flash"; 
+  // 2. Model Selection (FIXED)
+  // gemini-1.5-flash is stable, fast, and supports all inputs (text, image, audio)
+  const modelName = "gemini-2.5-flash-lite"; 
   
-  if (image || audio) {
-    console.log("   -> Detected Vision/Voice content. Switching to gemini-1.5-flash.");
-    modelName = "gemini-1.5-flash";
-  } else {
-    console.log("   -> Text only. Using gemini-2.5-flash.");
-  }
-
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`;
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
   const parts = [];
 
@@ -37,23 +34,25 @@ exports.getAiChatResponse = onCall({ secrets: ["OPENAI_API_KEY"], timeoutSeconds
         data: image
       }
     });
-    // Add context prompt if user didn't type anything
-    if (!message) parts.push({ text: "Analyze this image in detail." });
+    if (!message) parts.push({ text: "Describe this image." });
   }
 
   if (audio) {
     parts.push({
       inlineData: {
-        mimeType: "audio/mp4",
+        // NOTE: If you experience audio errors, change this to "audio/wav"
+        mimeType: "audio/mp4", 
         data: audio
       }
     });
-    // Add context prompt if user didn't type anything
     if (!message) parts.push({ text: "Listen to this audio and respond." });
   }
 
-  const payload = { contents: [{ parts }] };
+  const payload = { 
+    contents: [{ parts }] 
+  };
 
+  // 3. API Call
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
@@ -63,24 +62,24 @@ exports.getAiChatResponse = onCall({ secrets: ["OPENAI_API_KEY"], timeoutSeconds
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`3. AI Error (${modelName}):`, errorText);
-      throw new HttpsError("internal", `AI Provider Error: ${response.statusText}`);
+      console.error(`AI API Error (${response.status} - ${modelName}):`, errorText);
+      // Throw a clean error back to the app
+      throw new HttpsError("internal", `AI Provider Error: ${response.status} ${response.statusText}`);
     }
 
     const json = await response.json();
     
-    // Safety check
-    if (!json.candidates || json.candidates.length === 0) {
-      console.warn("   -> Blocked by safety filters.");
-      return { reply: "I'm sorry, I couldn't process that. It might have triggered a safety filter." };
+    // 4. Response Check
+    if (!json.candidates || !json.candidates[0]?.content?.parts?.[0]?.text) {
+      console.warn("API returned empty/blocked response:", JSON.stringify(json));
+      return { reply: "I'm sorry, I couldn't generate a response for that." };
     }
 
-    const reply = json.candidates[0].content.parts[0].text;
-    console.log("4. Success! Reply generated.");
-    return { reply };
+    return { reply: json.candidates[0].content.parts[0].text };
 
   } catch (error) {
-    console.error("5. Function Error:", error);
-    throw new HttpsError("internal", error.message);
+    console.error("Function Crash (likely API key or Network issue):", error);
+    if (error instanceof HttpsError) throw error;
+    throw new HttpsError("internal", error.message || "Unknown backend error occurred.");
   }
 });

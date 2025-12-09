@@ -2,16 +2,12 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
-import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
-import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   Dimensions,
-  Image,
   KeyboardAvoidingView,
   LayoutAnimation,
   Modal,
@@ -26,9 +22,9 @@ import {
   UIManager,
   View
 } from 'react-native';
-import { GiftedChat, IMessage } from 'react-native-gifted-chat';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { auth, db, getAiChatResponse } from './firebase.js';
+import AssistantScreen from './assistant';
+import { auth, db } from './firebase.js';
 
 import {
   createUserWithEmailAndPassword,
@@ -37,7 +33,7 @@ import {
   signOut,
   User
 } from 'firebase/auth';
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, setDoc, updateDoc } from 'firebase/firestore';
 
 type UserRole = 'elderly' | 'caregiver';
 type UserProfile = {
@@ -477,6 +473,42 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
   const totalCount = todaysReminders.length;
   const nextTask = getNextTask();
 
+  const handleEmergencyAlert = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+
+      // Get user profile to find linked caregiver
+      const userProfileRef = doc(db, 'users', currentUser.uid);
+      const userProfileSnap = await getDoc(userProfileRef);
+      
+      if (userProfileSnap.exists()) {
+        const userProfile = userProfileSnap.data();
+        const linkedCaregiverId = userProfile.linkedCaregiverId;
+        
+        if (linkedCaregiverId) {
+          // Create alert in caregiver's alerts collection
+          const alertsRef = collection(db, 'users', linkedCaregiverId, 'alerts');
+          await addDoc(alertsRef, {
+            message: `${userName} needs help!`,
+            timestamp: new Date().toISOString(),
+            elderlyId: currentUser.uid,
+            elderlyName: userName,
+            read: false,
+            createdAt: new Date(),
+          });
+
+          Alert.alert('Emergency Alert Sent', 'Your caregiver has been notified!');
+        } else {
+          Alert.alert('No Caregiver Linked', 'Please link a caregiver first.');
+        }
+      }
+    } catch (error: any) {
+      console.error('Error sending emergency alert:', error);
+      Alert.alert('Error', `Failed to send alert: ${error.message}`);
+    }
+  };
+
   return (
     <ScrollView style={styles.screenContainer} contentContainerStyle={{ paddingBottom: 20 }}>
       {/* Header */}
@@ -487,52 +519,18 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
         </TouchableOpacity>
       </View>
 
-      {/* Emergency SOS Button */}
-      <TouchableOpacity 
-        style={styles.sosButtonCard}
-        onPress={async () => {
-          try {
-            const currentUser = auth.currentUser;
-            if (!currentUser) return;
-
-            // Get user profile to find linked caregiver
-            const userProfileRef = doc(db, 'users', currentUser.uid);
-            const userProfileSnap = await getDoc(userProfileRef);
-            
-            if (userProfileSnap.exists()) {
-              const userData = userProfileSnap.data();
-              const caregiverId = userData.linkedCaregiverId;
-              
-              if (caregiverId) {
-                // Create SOS alert in caregiver's sosAlerts collection
-                await addDoc(collection(db, 'users', caregiverId, 'sosAlerts'), {
-                  elderlyId: currentUser.uid,
-                  elderlyName: userData.name,
-                  timestamp: serverTimestamp(),
-                  message: 'Emergency Alert!',
-                  read: false
-                });
-                
-                Alert.alert('Emergency Alert Sent!', 'Your caregiver has been notified.');
-              } else {
-                Alert.alert('No Caregiver Linked', 'Please link a caregiver first.');
-              }
-            }
-          } catch (error: any) {
-            console.error('Error sending emergency alert:', error);
-            Alert.alert('Error', `Failed to send alert: ${error.message}`);
-          }
-        }}
+      {/* Emergency Alert Button */}
+      <TouchableOpacity
+        style={styles.emergencyAlertButton}
+        onPress={handleEmergencyAlert}
         activeOpacity={0.8}
       >
-        <View style={styles.sosButtonContent}>
-          <View style={styles.sosIconContainer}>
-            <Ionicons name="warning" size={40} color={COLORS.white} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.sosButtonTitle}>Emergency Alert</Text>
-            <Text style={styles.sosButtonSubtitle}>Tap to send alert to your caregiver</Text>
-          </View>
+        <View style={styles.emergencyAlertIconContainer}>
+          <Ionicons name="warning" size={40} color={COLORS.white} />
+        </View>
+        <View style={styles.emergencyAlertTextContainer}>
+          <Text style={styles.emergencyAlertTitle}>Emergency Alert</Text>
+          <Text style={styles.emergencyAlertSubtitle}>Tap to send alert to your caregiver</Text>
         </View>
       </TouchableOpacity>
 
@@ -581,8 +579,6 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   const [reminders, setReminders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [sosAlerts, setSosAlerts] = useState<any[]>([]);
-  const [unreadSosCount, setUnreadSosCount] = useState(0);
 
   const isLinked = !!userProfile.linkedElderlyId;
   const elderlyName = elderlyProfile ? elderlyProfile.name : "No Elderly Linked";
@@ -615,22 +611,6 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   useFocusEffect(
     useCallback(() => {
       loadReminders();
-      
-      // Set up real-time listener for SOS alerts
-      const currentUser = auth.currentUser;
-      if (currentUser) {
-        const sosAlertsRef = collection(db, 'users', currentUser.uid, 'sosAlerts');
-        const q = query(sosAlertsRef, orderBy('timestamp', 'desc'));
-        
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-          const alerts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-          setSosAlerts(alerts);
-          const unreadCount = alerts.filter((alert: any) => !alert.read).length;
-          setUnreadSosCount(unreadCount);
-        });
-        
-        return () => unsubscribe();
-      }
     }, [userProfile.linkedElderlyId])
   );
 
@@ -669,15 +649,50 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
     return todaysReminders.filter(r => r.status === 'Completed');
   };
 
-  const markSosAsRead = async (alertId: string) => {
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+
+  const loadAlerts = async () => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        setAlertsLoading(false);
+        return;
+      }
+
+      const alertsRef = collection(db, 'users', currentUser.uid, 'alerts');
+      const q = query(alertsRef, orderBy('createdAt', 'desc'), limit(10));
+      const snapshot = await getDocs(q);
+
+      const loadedAlerts = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      setAlerts(loadedAlerts);
+      setAlertsLoading(false);
+    } catch (error) {
+      console.error('Error loading alerts:', error);
+      setAlertsLoading(false);
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      loadAlerts();
+    }, [])
+  );
+
+  const markAlertAsRead = async (alertId: string) => {
     try {
       const currentUser = auth.currentUser;
       if (!currentUser) return;
-      
-      const alertRef = doc(db, 'users', currentUser.uid, 'sosAlerts', alertId);
+
+      const alertRef = doc(db, 'users', currentUser.uid, 'alerts', alertId);
       await updateDoc(alertRef, { read: true });
+      loadAlerts();
     } catch (error) {
-      console.error('Error marking SOS as read:', error);
+      console.error('Error marking alert as read:', error);
     }
   };
 
@@ -685,6 +700,7 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   const completedCount = todaysReminders.filter(r => r.status === 'Completed').length;
   const totalCount = todaysReminders.length;
   const completedTasks = getCompletedTasks();
+  const unreadAlerts = alerts.filter(a => !a.read);
 
   // If linked but profile hasn't loaded (i.e., we are in the "Connecting..." state)
   if (isLinked && !elderlyProfile) {
@@ -746,7 +762,6 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
         </View>
       </View>
     </Card>
-    
     <Card key={refreshKey}>
       <Text style={styles.cardTitle}>Completed Tasks</Text>
       {loading ? (
@@ -768,66 +783,51 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
         ))
       )}
     </Card>
-    
-    {sosAlerts.length > 0 && (
-      <Card>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text style={styles.cardTitle}>SOS Alerts</Text>
-          {unreadSosCount > 0 && (
-            <View style={{
-              backgroundColor: COLORS.sosRed,
-              borderRadius: 12,
-              paddingHorizontal: 10,
-              paddingVertical: 4
-            }}>
-              <Text style={{ color: COLORS.white, fontWeight: 'bold', fontSize: 12 }}>{unreadSosCount} New</Text>
-            </View>
-          )}
-        </View>
-        {sosAlerts.slice(0, 3).map((alert, index) => (
+
+    <Card style={{ marginTop: 20 }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 }}>
+        <Text style={styles.cardTitle}>Emergency Alerts</Text>
+        {unreadAlerts.length > 0 && (
+          <View style={styles.alertBadge}>
+            <Text style={styles.alertBadgeText}>{unreadAlerts.length} New</Text>
+          </View>
+        )}
+      </View>
+      {alertsLoading ? (
+        <ActivityIndicator size="small" color={COLORS.primaryBlue} style={{ padding: 20 }} />
+      ) : alerts.length === 0 ? (
+        <Text style={{ color: COLORS.gray, textAlign: 'center', padding: 20 }}>No alerts</Text>
+      ) : (
+        alerts.map((alert, index) => (
           <View key={alert.id}>
             <TouchableOpacity
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                paddingVertical: 10,
-                opacity: alert.read ? 0.6 : 1
-              }}
-              onPress={() => markSosAsRead(alert.id)}
+              style={styles.alertItem}
+              onPress={() => !alert.read && markAlertAsRead(alert.id)}
             >
-              <View style={{
-                width: 40,
-                height: 40,
-                borderRadius: 20,
-                backgroundColor: alert.read ? COLORS.lightGray : COLORS.sosRed,
-                justifyContent: 'center',
-                alignItems: 'center',
-                marginRight: 12
-              }}>
-                <Ionicons name="warning" size={24} color={COLORS.white} />
+              <View style={styles.alertIconContainer}>
+                <Ionicons name="warning" size={24} color={COLORS.sosRed} />
               </View>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontWeight: 'bold', color: COLORS.black }}>
-                  {alert.elderlyName} needs help!
-                </Text>
-                <Text style={{ color: COLORS.gray, fontSize: 12, marginTop: 2 }}>
-                  {alert.timestamp?.toDate?.().toLocaleString() || 'Just now'}
+              <View style={styles.alertItemTextContainer}>
+                <Text style={styles.alertItemTitle}>{alert.message}</Text>
+                <Text style={styles.alertItemTime}>
+                  {new Date(alert.timestamp).toLocaleDateString('en-US', { 
+                    month: '2-digit', 
+                    day: '2-digit', 
+                    year: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: true
+                  })}
                 </Text>
               </View>
-              {!alert.read && (
-                <View style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: 4,
-                  backgroundColor: COLORS.sosRed
-                }} />
-              )}
+              {!alert.read && <View style={styles.unreadDot} />}
             </TouchableOpacity>
-            {index < sosAlerts.slice(0, 3).length - 1 && <View style={styles.divider} />}
+            {index < alerts.length - 1 && <View style={styles.divider} />}
           </View>
-        ))}
-      </Card>
-    )}
+        ))
+      )}
+    </Card>
   </ScrollView>
 );
 };
@@ -886,7 +886,7 @@ const RemindersScreen = () => {
           
           // Combine reminders and remove duplicates based on createdBy and title
           const reminderMap = new Map();
-          [...loadedReminders, ...linkedReminders].forEach(reminder => {
+          [...loadedReminders, ...linkedReminders].forEach((reminder: any) => {
             const key = `${reminder.createdBy}_${reminder.title}_${reminder.date}`;
             if (!reminderMap.has(key)) {
               reminderMap.set(key, reminder);
@@ -933,11 +933,6 @@ const RemindersScreen = () => {
       }
       // For Once reminders, use the global status
       return { ...reminder, currentDateString: dateString };
-    }).sort((a, b) => {
-      // Sort by time in ascending order
-      const timeA = a.time || '00:00';
-      const timeB = b.time || '00:00';
-      return timeA.localeCompare(timeB);
     });
   };
 
@@ -1142,9 +1137,9 @@ const RemindersScreen = () => {
       <View style={styles.header}>
   <Text style={styles.headerTitle}>Reminders</Text>
   <TouchableOpacity
-    onPress={() => navigation.navigate('add-reminder')}
+    onPress={() => router.push('/add-reminder')}
   >
-    <Ionicons name="add-circle-outline" size={28} color={COLORS.primaryBlue} />
+    <Ionicons name="add-circle-outline" size={28} color={COLORS.black} />
   </TouchableOpacity>
      </View>
 
@@ -1170,14 +1165,18 @@ const RemindersScreen = () => {
         <View style={{ overflow: 'hidden' }}>{renderCalendar()}</View>
       </View>
 
-      <Card>
-        <Text style={styles.cardTitle}>
-          Tasks for {selectedDate.toLocaleString('default', { month: 'short', day: 'numeric' })}
-        </Text>
+      <Text style={styles.tasksHeader}>
+        Tasks for {selectedDate.toLocaleString('default', { month: 'short', day: 'numeric' })}
+      </Text>
+      <ScrollView>
         {loading ? (
-          <ActivityIndicator size="small" color={COLORS.primaryBlue} style={{ padding: 20 }} />
+          <View style={{ padding: 20, alignItems: 'center' }}>
+            <ActivityIndicator size="large" color={COLORS.primaryBlue} />
+          </View>
         ) : getRemindersForDate(selectedDate).length === 0 ? (
-          <Text style={{ color: COLORS.gray, textAlign: 'center', padding: 20 }}>No reminders for this day</Text>
+          <View style={{ padding: 20, alignItems: 'center' }}>
+            <Text style={{ color: COLORS.gray, fontSize: 16 }}>No reminders for this day</Text>
+          </View>
         ) : (
           getRemindersForDate(selectedDate).map((reminder, index) => (
             <View key={reminder.id}>
@@ -1195,7 +1194,7 @@ const RemindersScreen = () => {
             </View>
           ))
         )}
-      </Card>
+      </ScrollView>
     </View>
   );
 };
@@ -1491,551 +1490,6 @@ const ProfileScreen = ({ userProfile }: { userProfile: UserProfile }) => {
         </TouchableOpacity>
       </View>
     </ScrollView>
-  );
-};
-
-const AssistantScreen = () => {
-  const [messages, setMessages] = useState<IMessage[]>([]);
-  const [isTyping, setIsTyping] = useState(false);
-  const [inputText, setInputText] = useState('');
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recording, setRecording] = useState<Audio.Recording | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [showSidebar, setShowSidebar] = useState(false);
-  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
-  const [chatSessions, setChatSessions] = useState<Array<{id: string, title: string, lastMessage: string, timestamp: Date}>>([]);
-
-  const AI_USER = { _id: 2, name: 'AI Assistant', avatar: 'https://placehold.co/40x40/007AFF/FFFFFF?text=AI' };
-
-  useEffect(() => {
-    loadChatSessions();
-  }, []);
-
-  const loadChatSessions = async () => {
-    setIsLoading(true);
-    try {
-      const currentUser = auth.currentUser;
-      if (!currentUser) {
-        setMessages([]);
-        setIsLoading(false);
-        return;
-      }
-
-      const chatsRef = collection(db, 'users', currentUser.uid, 'chatSessions');
-      const q = query(chatsRef, orderBy('lastUpdated', 'desc'));
-      const snapshot = await getDocs(q);
-
-      if (snapshot.empty) {
-        // Start new chat if none exist
-        await createNewChat();
-      } else {
-        const sessions = snapshot.docs.map(doc => ({
-          id: doc.id,
-          title: doc.data().title || 'New Chat',
-          lastMessage: doc.data().lastMessage || '',
-          timestamp: doc.data().lastUpdated?.toDate() || new Date(),
-        }));
-        setChatSessions(sessions);
-        
-        // Don't auto-load any chat - show empty state
-        setMessages([]);
-      }
-      setIsLoading(false);
-    } catch (error) {
-      console.error('Error loading chat sessions:', error);
-      setMessages([]);
-      setIsLoading(false);
-    }
-  };
-
-  const loadChatMessages = async (chatId: string) => {
-    try {
-      const currentUser = auth.currentUser;
-      if (!currentUser) return;
-
-      const messagesRef = collection(db, 'users', currentUser.uid, 'chatSessions', chatId, 'messages');
-      const q = query(messagesRef, orderBy('createdAt', 'desc'));
-      const snapshot = await getDocs(q);
-
-      if (snapshot.empty) {
-        setMessages([]);
-        return;
-      }
-
-      const loadedMessages = snapshot.docs.map(doc => {
-        const data = doc.data();
-        return {
-          _id: doc.id,
-          text: data.text || '',
-          createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt || Date.now()),
-          user: data.user || { _id: 1 },
-          image: data.image || undefined,
-        };
-      });
-
-      setMessages(loadedMessages);
-    } catch (error) {
-      console.error('Error loading messages:', error);
-    }
-  };
-
-  const createNewChat = async (): Promise<string> => {
-    try {
-      const currentUser = auth.currentUser;
-      if (!currentUser) {
-        console.log('No user logged in');
-        Alert.alert('Error', 'You must be logged in to create a chat');
-        return '';
-      }
-
-      console.log('Creating new chat document for user:', currentUser.uid);
-      const chatsRef = collection(db, 'users', currentUser.uid, 'chatSessions');
-      const newChatRef = await addDoc(chatsRef, {
-        title: 'New Chat',
-        lastMessage: '',
-        lastUpdated: serverTimestamp(),
-        createdAt: serverTimestamp(),
-      });
-
-      const newChatId = newChatRef.id;
-      console.log('✅ New chat document created with ID:', newChatId);
-      
-      // Immediately set current chat ID
-      setCurrentChatId(newChatId);
-      
-      // Clear messages for new chat
-      setMessages([]);
-      console.log('✅ New chat ready');
-      
-      // Add new session to the list
-      const newSession = {
-        id: newChatId,
-        title: 'New Chat',
-        lastMessage: '',
-        timestamp: new Date(),
-      };
-      setChatSessions(prev => {
-        const updated = [newSession, ...prev];
-        console.log('✅ Chat sessions updated. Total:', updated.length);
-        return updated;
-      });
-      
-      return newChatId;
-    } catch (error: any) {
-      console.error('❌ Error creating new chat:', error);
-      console.error('Error details:', error.message, error.code);
-      Alert.alert('Error', `Failed to create new chat: ${error.message}`);
-      return '';
-    }
-  };
-
-  const saveMessageToFirestore = async (message: IMessage, chatId?: string) => {
-    try {
-      const currentUser = auth.currentUser;
-      const activeChatId = chatId || currentChatId;
-      
-      if (!currentUser || !activeChatId) {
-        console.log('Cannot save message: no user or chat ID', { user: !!currentUser, chatId: activeChatId });
-        return;
-      }
-
-      console.log('Saving message to chat:', activeChatId);
-      const messagesRef = collection(db, 'users', currentUser.uid, 'chatSessions', activeChatId, 'messages');
-      await addDoc(messagesRef, {
-        text: message.text,
-        createdAt: serverTimestamp(),
-        user: message.user,
-        image: message.image || null,
-      });
-
-      // Update chat session with last message and title
-      const chatRef = doc(db, 'users', currentUser.uid, 'chatSessions', activeChatId);
-      const updateData: any = {
-        lastMessage: message.text.substring(0, 50),
-        lastUpdated: serverTimestamp(),
-      };
-      
-      // Auto-generate title from first user message
-      if (messages.length <= 1 && message.user._id === 1) {
-        updateData.title = message.text.substring(0, 30) + (message.text.length > 30 ? '...' : '');
-      }
-      
-      await setDoc(chatRef, updateData, { merge: true });
-      console.log('Message saved successfully');
-    } catch (error) {
-      console.error('Error saving message:', error);
-    }
-  };
-
-  const handleNewChat = async () => {
-    console.log('handleNewChat called');
-    setShowSidebar(false);
-    setInputText('');
-    setSelectedImage(null);
-    
-    const newChatId = await createNewChat();
-    console.log('handleNewChat completed with ID:', newChatId);
-  };
-
-  const handlePickImage = async () => {
-    
-    if (Platform.OS === 'web') {
-      await pickImage(false); 
-      return;
-    }
-
-    Alert.alert("Upload Photo", "Choose an option", [
-      { text: "Camera", onPress: () => pickImage(true) },
-      { text: "Gallery", onPress: () => pickImage(false) },
-      { text: "Cancel", style: "cancel" }
-    ]);
-  };
-
-  const pickImage = async (useCamera: boolean) => {
-    let result;
-    if (useCamera) {
-      await ImagePicker.requestCameraPermissionsAsync();
-      result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        quality: 0.5,
-        base64: true, // Crucial for sending to AI
-      });
-    } else {
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-      result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        quality: 0.5,
-        base64: true,
-      });
-    }
-
-    if (!result.canceled && result.assets && result.assets.length > 0) {
-      // Store the local URI for preview and base64 for sending
-      setSelectedImage(result.assets[0].uri);
-    }
-  };
-
-  const handleMicPress = async () => {
-    if (isRecording) {
-      // Stop recording and process audio
-      setIsRecording(false);
-      if (recording) {
-        try {
-          await recording.stopAndUnloadAsync();
-          const uri = recording.getURI();
-          setRecording(null);
-          
-          if (uri) {
-            // Ensure we have a chat session
-            let chatId = currentChatId;
-            if (!chatId) {
-              console.log('No current chat ID, creating new chat...');
-              chatId = await createNewChat();
-              if (!chatId) {
-                Alert.alert('Error', 'Could not create chat. Please try again.');
-                return;
-              }
-            }
-            
-            // Read audio file as base64
-            const base64Audio = await FileSystem.readAsStringAsync(uri, { 
-              encoding: FileSystem.EncodingType.Base64 
-            });
-            
-            // Create user message with audio indicator
-            const userMsg: IMessage = {
-              _id: new Date().getTime().toString(),
-              text: '🎤 Voice message',
-              createdAt: new Date(),
-              user: { _id: 1 },
-            };
-            
-            setMessages(prev => GiftedChat.append(prev, [userMsg]));
-            await saveMessageToFirestore(userMsg, chatId);
-            setIsTyping(true);
-            
-            // Send audio to AI
-            try {
-              const result = await getAiChatResponse({ 
-                message: '', 
-                audio: base64Audio 
-              });
-              
-              const botReplyText = (result.data as { reply: string }).reply;
-              
-              const botMessage: IMessage = {
-                _id: (new Date().getTime() + 1).toString(),
-                text: botReplyText,
-                createdAt: new Date(),
-                user: AI_USER,
-              };
-              setMessages(prev => GiftedChat.append(prev, [botMessage]));
-              await saveMessageToFirestore(botMessage, chatId);
-            } catch (error) {
-              console.error('Error processing audio:', error);
-              const errorMessage: IMessage = {
-                _id: (new Date().getTime() + 1).toString(),
-                text: 'Sorry, I had trouble processing your voice message. Please try again.',
-                createdAt: new Date(),
-                user: AI_USER,
-              };
-              setMessages(prev => GiftedChat.append(prev, [errorMessage]));
-              await saveMessageToFirestore(errorMessage, chatId);
-            } finally {
-              setIsTyping(false);
-            }
-          }
-        } catch (err) {
-          console.error('Failed to stop recording', err);
-          Alert.alert("Error", "Failed to process the recording.");
-        }
-      }
-    } else {
-      // Start recording
-      try {
-        await Audio.requestPermissionsAsync();
-        await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-        const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-        setRecording(recording);
-        setIsRecording(true);
-      } catch (err) {
-        console.error('Failed to start recording', err);
-        Alert.alert("Error", "Failed to start recording. Please check microphone permissions.");
-      }
-    }
-  };
-
-  const handleSend = async () => {
-    if (!inputText.trim() && !selectedImage) return;
-
-    // Ensure we have a chat session
-    let chatId = currentChatId;
-    if (!chatId) {
-      console.log('No current chat ID, creating new chat...');
-      chatId = await createNewChat();
-      if (!chatId) {
-        Alert.alert('Error', 'Could not create chat. Please try again.');
-        return;
-      }
-      // Update state with new chat ID
-      setCurrentChatId(chatId);
-    }
-
-    console.log('Sending message to chat:', chatId);
-
-    // 1. Construct User Message
-    const userMsg: IMessage = {
-      _id: new Date().getTime().toString(),
-      text: inputText,
-      createdAt: new Date(),
-      user: { _id: 1 },
-      image: selectedImage || undefined,
-    };
-
-    setMessages(prev => GiftedChat.append(prev, [userMsg]));
-    setInputText('');
-    const imageToSend = selectedImage; // Snapshot current image
-    setSelectedImage(null); // Clear preview
-    setIsTyping(true);
-
-    // Save user message to Firestore with explicit chatId
-    await saveMessageToFirestore(userMsg, chatId);
-
-    try {
-      // 2. Prepare Base64 if image exists
-      let base64Image = null;
-      if (imageToSend) {
-        // If image picker didn't give base64 (sometimes it doesn't on some platforms), read it
-        base64Image = await FileSystem.readAsStringAsync(imageToSend, { encoding: FileSystem.EncodingType.Base64 });
-      }
-
-      // 3. Call Backend
-      const result = await getAiChatResponse({ 
-        message: userMsg.text, 
-        image: base64Image 
-      });
-
-      const botReplyText = (result.data as { reply: string }).reply;
-      
-      const botMessage: IMessage = {
-        _id: (new Date().getTime() + 1).toString(),
-        text: botReplyText,
-        createdAt: new Date(),
-        user: AI_USER,
-      };
-      setMessages(prev => GiftedChat.append(prev, [botMessage]));
-      
-      // Save AI message to Firestore with explicit chatId
-      await saveMessageToFirestore(botMessage, chatId);
-
-    } catch (error) {
-      const errorMessage: IMessage = {
-        _id: (new Date().getTime() + 1).toString(),
-        text: 'Sorry, I had trouble connecting to the AI. Please try again.',
-        createdAt: new Date(),
-        user: AI_USER,
-      };
-      setMessages(prev => GiftedChat.append(prev, [errorMessage]));
-      await saveMessageToFirestore(errorMessage, chatId);
-    } finally {
-      setIsTyping(false);
-    }
-  };
-
-  return (
-    <KeyboardAvoidingView 
-      style={styles.screenContainer}
-      behavior='padding'
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 30 : 30}
-    >
-      {/* Sidebar for chat history */}
-      {showSidebar && (
-        <View style={styles.sidebar}>
-          <View style={styles.sidebarHeader}>
-            <Text style={styles.sidebarTitle}>Chats</Text>
-            <TouchableOpacity onPress={() => setShowSidebar(false)}>
-              <Ionicons name="close" size={24} color={COLORS.black} />
-            </TouchableOpacity>
-          </View>
-          <TouchableOpacity style={styles.newChatBtn} onPress={handleNewChat}>
-            <Ionicons name="add" size={20} color={COLORS.white} />
-            <Text style={styles.newChatBtnText}>New Chat</Text>
-          </TouchableOpacity>
-          <ScrollView style={styles.chatList}>
-            {chatSessions.map(session => (
-              <TouchableOpacity
-                key={session.id}
-                style={[
-                  styles.chatSessionItem,
-                  currentChatId === session.id && styles.chatSessionItemActive
-                ]}
-                onPress={async () => {
-                  setCurrentChatId(session.id);
-                  await loadChatMessages(session.id);
-                  setShowSidebar(false);
-                }}
-              >
-                <Text style={styles.chatSessionTitle} numberOfLines={1}>
-                  {session.title}
-                </Text>
-                <Text style={styles.chatSessionPreview} numberOfLines={1}>
-                  {session.lastMessage}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
-      )}
-
-      {/* Main chat area */}
-      <View style={{ flex: 1 }}>
-        {/* Header */}
-        <View style={[styles.header, { justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: COLORS.divider }]}>
-          <TouchableOpacity onPress={() => setShowSidebar(true)}>
-            <Ionicons name="menu" size={28} color={COLORS.black} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>AI Assistant</Text>
-          <TouchableOpacity onPress={handleNewChat}>
-            <Ionicons name="create-outline" size={26} color={COLORS.black} />
-          </TouchableOpacity>
-        </View>
-
-        {isLoading ? (
-          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-            <ActivityIndicator size="large" color={COLORS.primaryBlue} />
-            <Text style={{ marginTop: 10, color: COLORS.gray }}>Loading chat...</Text>
-          </View>
-        ) : (
-          <View style={{ flex: 1 }}>
-            {messages.length === 0 ? (
-              <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 40 }}>
-                <Text style={{ fontSize: 24, fontWeight: 'bold', color: COLORS.black, textAlign: 'center' }}>
-                  How can I help you today?
-                </Text>
-              </View>
-            ) : (
-              <ScrollView 
-                ref={(ref) => { if (ref) ref.scrollToEnd({ animated: true }); }}
-                style={{ flex: 1 }}
-                contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 10 }}
-              >
-                {messages.slice().reverse().map((message) => (
-                  <View key={message._id} style={{ marginBottom: 16, alignItems: message.user._id === 1 ? 'flex-end' : 'flex-start' }}>
-                    <View style={{
-                      maxWidth: '80%',
-                      padding: 12,
-                      borderRadius: 16,
-                      backgroundColor: message.user._id === 1 ? COLORS.primaryBlue : COLORS.lightGray,
-                    }}>
-                      {message.image && (
-                        <Image source={{ uri: message.image }} style={{ width: 200, height: 200, borderRadius: 8, marginBottom: 8 }} />
-                      )}
-                      <Text style={{ color: message.user._id === 1 ? COLORS.white : COLORS.black, fontSize: 16 }}>
-                        {message.text}
-                      </Text>
-                    </View>
-                  </View>
-                ))}
-                {isTyping && (
-                  <View style={{ marginBottom: 16, alignItems: 'flex-start' }}>
-                    <View style={{
-                      padding: 12,
-                      borderRadius: 16,
-                      backgroundColor: COLORS.lightGray,
-                    }}>
-                      <Text style={{ color: COLORS.gray }}>Typing...</Text>
-                    </View>
-                  </View>
-                )}
-              </ScrollView>
-            )}
-
-            {/* Custom Input Bar - Fixed at bottom */}
-            <View style={styles.customInputContainer}>
-              {selectedImage && (
-                <View style={styles.imagePreviewContainer}>
-                  <Image source={{ uri: selectedImage }} style={styles.imagePreview} />
-                  <TouchableOpacity onPress={() => setSelectedImage(null)} style={styles.removeImageBtn}>
-                    <Ionicons name="close-circle" size={24} color={COLORS.red} />
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              <View style={styles.inputRow}>
-                <TouchableOpacity style={styles.circleBtn} onPress={handlePickImage}>
-                  <Ionicons name="add" size={24} color={COLORS.gray} />
-                </TouchableOpacity>
-
-                <TextInput
-                  style={styles.pillInput}
-                  placeholder="Message AI Assistant..."
-                  placeholderTextColor={COLORS.gray}
-                  value={inputText}
-                  onChangeText={setInputText}
-                  multiline
-                />
-
-                {inputText.length > 0 || selectedImage ? (
-                  <TouchableOpacity style={[styles.circleBtn, { backgroundColor: COLORS.primaryBlue }]} onPress={handleSend}>
-                    <Ionicons name="arrow-up" size={20} color={COLORS.white} />
-                  </TouchableOpacity>
-                ) : (
-                  <TouchableOpacity 
-                    style={[styles.circleBtn, isRecording && { backgroundColor: COLORS.red }]} 
-                    onPress={handleMicPress}
-                  >
-                    <Ionicons name={isRecording ? "stop" : "mic"} size={20} color={isRecording ? COLORS.white : COLORS.gray} />
-                  </TouchableOpacity>
-                )}
-              </View>
-            </View>
-          </View>
-        )}
-      </View>
-    </KeyboardAvoidingView>
   );
 };
 
@@ -2438,41 +1892,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold', 
     marginBottom: 15 },
   cardSubtitle: { fontSize: 14, color: COLORS.gray, marginBottom: 15 },
-  sosButtonCard: {
-    backgroundColor: COLORS.sosRed,
-    borderRadius: 15,
-    padding: 20,
-    marginHorizontal: 20,
-    marginTop: 20,
-    shadowColor: COLORS.red,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  sosButtonContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  sosIconContainer: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 15,
-  },
-  sosButtonTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: COLORS.white,
-    marginBottom: 4,
-  },
-  sosButtonSubtitle: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.9)',
-  },
   goalItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   goalText: { marginLeft: 15, flex: 1 },
   goalTitle: { fontSize: 16, fontWeight: '600' },
@@ -2720,5 +2139,87 @@ const styles = StyleSheet.create({
     padding: 20,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.divider,
+  },
+  emergencyAlertButton: {
+    backgroundColor: COLORS.sosRed,
+    marginHorizontal: 20,
+    marginTop: 20,
+    padding: 20,
+    borderRadius: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5,
+    elevation: 5,
+  },
+  emergencyAlertIconContainer: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emergencyAlertTextContainer: {
+    flex: 1,
+    marginLeft: 15,
+  },
+  emergencyAlertTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: COLORS.white,
+    marginBottom: 5,
+  },
+  emergencyAlertSubtitle: {
+    fontSize: 14,
+    color: COLORS.white,
+    opacity: 0.9,
+  },
+  alertBadge: {
+    backgroundColor: COLORS.sosRed,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  alertBadgeText: {
+    color: COLORS.white,
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  alertItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+  },
+  alertIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(217, 54, 54, 0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  alertItemTextContainer: {
+    flex: 1,
+    marginLeft: 15,
+  },
+  alertItemTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.black,
+    marginBottom: 4,
+  },
+  alertItemTime: {
+    fontSize: 13,
+    color: COLORS.gray,
+  },
+  unreadDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.sosRed,
+    marginLeft: 10,
   },
 });
