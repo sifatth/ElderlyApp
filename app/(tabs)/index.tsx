@@ -487,6 +487,23 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
         </TouchableOpacity>
       </View>
 
+      {/* Emergency SOS Button */}
+      <TouchableOpacity 
+        style={styles.sosButtonCard}
+        onPress={onAlertPress}
+        activeOpacity={0.8}
+      >
+        <View style={styles.sosButtonContent}>
+          <View style={styles.sosIconContainer}>
+            <Ionicons name="warning" size={40} color={COLORS.white} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.sosButtonTitle}>Emergency Alert</Text>
+            <Text style={styles.sosButtonSubtitle}>Tap to send alert to your caregiver</Text>
+          </View>
+        </View>
+      </TouchableOpacity>
+
       <Card style={{ marginTop: 20 }}>
         <Text style={styles.cardTitle}>Today's Reminders</Text>
         <Text style={styles.cardSubtitle}>Last updated: {new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</Text>
@@ -532,6 +549,8 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   const [reminders, setReminders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [sosAlerts, setSosAlerts] = useState<any[]>([]);
+  const [unreadSosCount, setUnreadSosCount] = useState(0);
 
   const isLinked = !!userProfile.linkedElderlyId;
   const elderlyName = elderlyProfile ? elderlyProfile.name : "No Elderly Linked";
@@ -564,6 +583,22 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   useFocusEffect(
     useCallback(() => {
       loadReminders();
+      
+      // Set up real-time listener for SOS alerts
+      const currentUser = auth.currentUser;
+      if (currentUser) {
+        const sosAlertsRef = collection(db, 'users', currentUser.uid, 'sosAlerts');
+        const q = query(sosAlertsRef, orderBy('timestamp', 'desc'));
+        
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+          const alerts = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+          setSosAlerts(alerts);
+          const unreadCount = alerts.filter((alert: any) => !alert.read).length;
+          setUnreadSosCount(unreadCount);
+        });
+        
+        return () => unsubscribe();
+      }
     }, [userProfile.linkedElderlyId])
   );
 
@@ -600,6 +635,18 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   const getCompletedTasks = () => {
     const todaysReminders = getTodaysReminders();
     return todaysReminders.filter(r => r.status === 'Completed');
+  };
+
+  const markSosAsRead = async (alertId: string) => {
+    try {
+      const currentUser = auth.currentUser;
+      if (!currentUser) return;
+      
+      const alertRef = doc(db, 'users', currentUser.uid, 'sosAlerts', alertId);
+      await updateDoc(alertRef, { read: true });
+    } catch (error) {
+      console.error('Error marking SOS as read:', error);
+    }
   };
 
   const todaysReminders = getTodaysReminders();
@@ -667,6 +714,7 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
         </View>
       </View>
     </Card>
+    
     <Card key={refreshKey}>
       <Text style={styles.cardTitle}>Completed Tasks</Text>
       {loading ? (
@@ -688,6 +736,66 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
         ))
       )}
     </Card>
+    
+    {sosAlerts.length > 0 && (
+      <Card>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Text style={styles.cardTitle}>SOS Alerts</Text>
+          {unreadSosCount > 0 && (
+            <View style={{
+              backgroundColor: COLORS.sosRed,
+              borderRadius: 12,
+              paddingHorizontal: 10,
+              paddingVertical: 4
+            }}>
+              <Text style={{ color: COLORS.white, fontWeight: 'bold', fontSize: 12 }}>{unreadSosCount} New</Text>
+            </View>
+          )}
+        </View>
+        {sosAlerts.slice(0, 3).map((alert, index) => (
+          <View key={alert.id}>
+            <TouchableOpacity
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                paddingVertical: 10,
+                opacity: alert.read ? 0.6 : 1
+              }}
+              onPress={() => markSosAsRead(alert.id)}
+            >
+              <View style={{
+                width: 40,
+                height: 40,
+                borderRadius: 20,
+                backgroundColor: alert.read ? COLORS.lightGray : COLORS.sosRed,
+                justifyContent: 'center',
+                alignItems: 'center',
+                marginRight: 12
+              }}>
+                <Ionicons name="warning" size={24} color={COLORS.white} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: 'bold', color: COLORS.black }}>
+                  {alert.elderlyName} needs help!
+                </Text>
+                <Text style={{ color: COLORS.gray, fontSize: 12, marginTop: 2 }}>
+                  {alert.timestamp?.toDate?.().toLocaleString() || 'Just now'}
+                </Text>
+              </View>
+              {!alert.read && (
+                <View style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  backgroundColor: COLORS.sosRed
+                }} />
+              )}
+            </TouchableOpacity>
+            {index < sosAlerts.slice(0, 3).length - 1 && <View style={styles.divider} />}
+          </View>
+        ))}
+      </Card>
+    )}
   </ScrollView>
 );
 };
@@ -1004,7 +1112,7 @@ const RemindersScreen = () => {
   <TouchableOpacity
     onPress={() => navigation.navigate('add-reminder')}
   >
-    <Ionicons name="add-circle-outline" size={28} color={COLORS.black} />
+    <Ionicons name="add-circle-outline" size={28} color={COLORS.primaryBlue} />
   </TouchableOpacity>
      </View>
 
@@ -1947,7 +2055,7 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
           <TouchableOpacity activeOpacity={1} style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={{ fontSize: 20, fontWeight: 'bold' }}>
-                {userProfile.role === 'elderly' ? 'Emergency Alert' : 'Alerts'}
+                Notifications
               </Text>
               <TouchableOpacity onPress={() => setShowAlertModal(false)}>
                 <Ionicons name="close" size={28} color={COLORS.black} />
@@ -1955,41 +2063,9 @@ const AppTabs = ({ userProfile }: { userProfile: UserProfile }) => {
             </View>
             
             <View style={{ padding: 20 }}>
-              {userProfile.role === 'elderly' ? (
-                <View style={{ alignItems: 'center' }}>
-                  <Text style={{ fontSize: 16, color: COLORS.gray, marginBottom: 30, textAlign: 'center' }}>
-                    Press the button below to send an emergency alert to your caregiver
-                  </Text>
-                  <TouchableOpacity
-                    style={{
-                      backgroundColor: COLORS.red,
-                      width: Dimensions.get('window').width * 0.6,
-                      height: Dimensions.get('window').width * 0.6,
-                      borderRadius: Dimensions.get('window').width * 0.3,
-                      justifyContent: 'center',
-                      alignItems: 'center',
-                      shadowColor: '#000',
-                      shadowOffset: { width: 0, height: 4 },
-                      shadowOpacity: 0.3,
-                      shadowRadius: 5,
-                      elevation: 8,
-                    }}
-                    onPress={() => {
-                      Alert.alert('SOS Sent!', 'Your caregiver has been notified.');
-                      setShowAlertModal(false);
-                    }}
-                  >
-                    <Text style={{ color: COLORS.white, fontSize: 32, fontWeight: 'bold' }}>SOS</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <Card>
-                  <Text style={styles.cardTitle}>Recent Alerts</Text>
-                  <Text style={{ color: COLORS.gray, marginTop: 10 }}>
-                    No recent alerts from {elderlyProfile?.name || 'elderly user'}
-                  </Text>
-                </Card>
-              )}
+              <Text style={{ fontSize: 16, color: COLORS.gray, textAlign: 'center' }}>
+                No notifications yet
+              </Text>
             </View>
           </TouchableOpacity>
         </TouchableOpacity>
@@ -2330,6 +2406,41 @@ const styles = StyleSheet.create({
     fontWeight: 'bold', 
     marginBottom: 15 },
   cardSubtitle: { fontSize: 14, color: COLORS.gray, marginBottom: 15 },
+  sosButtonCard: {
+    backgroundColor: COLORS.sosRed,
+    borderRadius: 15,
+    padding: 20,
+    marginHorizontal: 20,
+    marginTop: 20,
+    shadowColor: COLORS.red,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  sosButtonContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sosIconContainer: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 15,
+  },
+  sosButtonTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: COLORS.white,
+    marginBottom: 4,
+  },
+  sosButtonSubtitle: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.9)',
+  },
   goalItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   goalText: { marginLeft: 15, flex: 1 },
   goalTitle: { fontSize: 16, fontWeight: '600' },
