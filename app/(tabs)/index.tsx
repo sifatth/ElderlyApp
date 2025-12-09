@@ -793,6 +793,11 @@ const RemindersScreen = () => {
       }
       // For Once reminders, use the global status
       return { ...reminder, currentDateString: dateString };
+    }).sort((a, b) => {
+      // Sort by time in ascending order
+      const timeA = a.time || '00:00';
+      const timeB = b.time || '00:00';
+      return timeA.localeCompare(timeB);
     });
   };
 
@@ -1025,18 +1030,14 @@ const RemindersScreen = () => {
         <View style={{ overflow: 'hidden' }}>{renderCalendar()}</View>
       </View>
 
-      <Text style={styles.tasksHeader}>
-        Tasks for {selectedDate.toLocaleString('default', { month: 'short', day: 'numeric' })}
-      </Text>
-      <ScrollView>
+      <Card>
+        <Text style={styles.cardTitle}>
+          Tasks for {selectedDate.toLocaleString('default', { month: 'short', day: 'numeric' })}
+        </Text>
         {loading ? (
-          <View style={{ padding: 20, alignItems: 'center' }}>
-            <ActivityIndicator size="large" color={COLORS.primaryBlue} />
-          </View>
+          <ActivityIndicator size="small" color={COLORS.primaryBlue} style={{ padding: 20 }} />
         ) : getRemindersForDate(selectedDate).length === 0 ? (
-          <View style={{ padding: 20, alignItems: 'center' }}>
-            <Text style={{ color: COLORS.gray, fontSize: 16 }}>No reminders for this day</Text>
-          </View>
+          <Text style={{ color: COLORS.gray, textAlign: 'center', padding: 20 }}>No reminders for this day</Text>
         ) : (
           getRemindersForDate(selectedDate).map((reminder, index) => (
             <View key={reminder.id}>
@@ -1054,7 +1055,7 @@ const RemindersScreen = () => {
             </View>
           ))
         )}
-      </ScrollView>
+      </Card>
     </View>
   );
 };
