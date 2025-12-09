@@ -490,7 +490,39 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
       {/* Emergency SOS Button */}
       <TouchableOpacity 
         style={styles.sosButtonCard}
-        onPress={onAlertPress}
+        onPress={async () => {
+          try {
+            const currentUser = auth.currentUser;
+            if (!currentUser) return;
+
+            // Get user profile to find linked caregiver
+            const userProfileRef = doc(db, 'users', currentUser.uid);
+            const userProfileSnap = await getDoc(userProfileRef);
+            
+            if (userProfileSnap.exists()) {
+              const userData = userProfileSnap.data();
+              const caregiverId = userData.linkedCaregiverId;
+              
+              if (caregiverId) {
+                // Create SOS alert in caregiver's sosAlerts collection
+                await addDoc(collection(db, 'users', caregiverId, 'sosAlerts'), {
+                  elderlyId: currentUser.uid,
+                  elderlyName: userData.name,
+                  timestamp: serverTimestamp(),
+                  message: 'Emergency Alert!',
+                  read: false
+                });
+                
+                Alert.alert('Emergency Alert Sent!', 'Your caregiver has been notified.');
+              } else {
+                Alert.alert('No Caregiver Linked', 'Please link a caregiver first.');
+              }
+            }
+          } catch (error: any) {
+            console.error('Error sending emergency alert:', error);
+            Alert.alert('Error', `Failed to send alert: ${error.message}`);
+          }
+        }}
         activeOpacity={0.8}
       >
         <View style={styles.sosButtonContent}>
