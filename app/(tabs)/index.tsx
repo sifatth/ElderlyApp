@@ -23,9 +23,14 @@ import {
   View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
 import AssistantScreen from './assistant';
 import { auth, db } from './firebase.js';
 
+import * as Location from 'expo-location';
+import MapView, { Marker } from 'react-native-maps';
+
+// Firebase/auth';
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -33,6 +38,7 @@ import {
   signOut,
   User
 } from 'firebase/auth';
+
 import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, setDoc, updateDoc } from 'firebase/firestore';
 
 type UserRole = 'elderly' | 'caregiver';
@@ -412,6 +418,7 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
 
         const reminderRef = doc(db, 'users', currentUser.uid, 'reminders', reminder.id);
         await updateDoc(reminderRef, { completedDates: updatedCompletedDates });
+        
 
         // Update in linked user's collection
         const userProfileRef = doc(db, 'users', currentUser.uid);
@@ -476,7 +483,24 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
   const handleEmergencyAlert = async () => {
     try {
       const currentUser = auth.currentUser;
-      if (!currentUser) return;
+      if (!currentUser) {
+        Alert.alert('Error', 'User not found');
+        return;
+      }
+
+      // permission for location
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Please allow location access to send SOS with your location.');
+        return;
+      }
+
+      // present location
+      let location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.High,
+      });
+
+      const { latitude, longitude } = location.coords;
 
       // Get user profile to find linked caregiver
       const userProfileRef = doc(db, 'users', currentUser.uid);
@@ -496,6 +520,7 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
             elderlyName: userName,
             read: false,
             createdAt: new Date(),
+            location: { latitude, longitude },
           });
 
           Alert.alert('Emergency Alert Sent', 'Your caregiver has been notified!');
@@ -535,7 +560,7 @@ const ElderlyDashboard = ({ userName, onAlertPress }: { userName: string, onAler
       </TouchableOpacity>
 
       <Card style={{ marginTop: 20 }}>
-        <Text style={styles.cardTitle}>Today's Reminders</Text>
+        <Text style={styles.cardTitle}>Today's Status</Text>
         <Text style={styles.cardSubtitle}>Last updated: {new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</Text>
         <View style={styles.statusContainer}>
           <View style={styles.statusBox}>
@@ -579,6 +604,11 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
   const [reminders, setReminders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const [alerts, setAlerts] = useState<any[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [showMapModal, setShowMapModal] = useState(false);
+  const [selectedLocation, setSelectedLocation] = useState<{ latitude: number; longitude: number } | null>(null);
 
   const isLinked = !!userProfile.linkedElderlyId;
   const elderlyName = elderlyProfile ? elderlyProfile.name : "No Elderly Linked";
@@ -649,9 +679,6 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
     return todaysReminders.filter(r => r.status === 'Completed');
   };
 
-  const [alerts, setAlerts] = useState<any[]>([]);
-  const [alertsLoading, setAlertsLoading] = useState(true);
-
   const loadAlerts = async () => {
     try {
       const currentUser = auth.currentUser;
@@ -661,13 +688,13 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
       }
 
       const alertsRef = collection(db, 'users', currentUser.uid, 'alerts');
-      const q = query(alertsRef, orderBy('createdAt', 'desc'), limit(10));
+      const q = query(alertsRef, orderBy('createdAt', 'desc'), limit(20));
       const snapshot = await getDocs(q);
 
       const loadedAlerts = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data(),
-      }));
+      })) as any[];
 
       setAlerts(loadedAlerts);
       setAlertsLoading(false);
@@ -683,16 +710,20 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
     }, [])
   );
 
-  const markAlertAsRead = async (alertId: string) => {
-    try {
-      const currentUser = auth.currentUser;
-      if (!currentUser) return;
+  const handleAlertPress = (alert: any) => {
+    if (!alert.read) {
+      const alertRef = doc(db, 'users', auth.currentUser!.uid, 'alerts', alert.id);
+      updateDoc(alertRef, { read: true });
+    }
 
-      const alertRef = doc(db, 'users', currentUser.uid, 'alerts', alertId);
-      await updateDoc(alertRef, { read: true });
-      loadAlerts();
-    } catch (error) {
-      console.error('Error marking alert as read:', error);
+    if (alert.location?.latitude && alert.location?.longitude) {
+      setSelectedLocation({
+        latitude: alert.location.latitude,
+        longitude: alert.location.longitude,
+      });
+      setShowMapModal(true);
+    } else {
+      Alert.alert('No Location', 'This emergency alert was sent without location.');
     }
   };
 
@@ -802,7 +833,7 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
           <View key={alert.id}>
             <TouchableOpacity
               style={styles.alertItem}
-              onPress={() => !alert.read && markAlertAsRead(alert.id)}
+              onPress={() => handleAlertPress(alert)}
             >
               <View style={styles.alertIconContainer}>
                 <Ionicons name="warning" size={24} color={COLORS.sosRed} />
@@ -828,9 +859,63 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
         ))
       )}
     </Card>
+    {/* MAP MODAL */}
+<Modal
+  visible={showMapModal}
+  transparent={true}
+  animationType="slide"
+  onRequestClose={() => setShowMapModal(false)}
+>
+  <View style={{
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center'
+  }}>
+    <View style={{
+      width: '90%',
+      height: '70%',
+      backgroundColor: 'white',
+      borderRadius: 15,
+      overflow: 'hidden'
+    }}>
+      
+      {/* Close button */}
+      <TouchableOpacity
+        onPress={() => setShowMapModal(false)}
+        style={{ padding: 10, backgroundColor: '#eee' }}
+      >
+        <Text style={{ fontSize: 16, textAlign: 'center' }}>Close</Text>
+      </TouchableOpacity>
+
+      {/* Map */}
+      {selectedLocation && (
+        <MapView
+          style={{ flex: 1 }}
+          initialRegion={{
+            latitude: selectedLocation.latitude,
+            longitude: selectedLocation.longitude,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          }}
+        >
+          <Marker
+            coordinate={{
+              latitude: selectedLocation.latitude,
+              longitude: selectedLocation.longitude
+            }}
+            title="Elderly Location"
+          />
+        </MapView>
+      )}
+
+    </View>
+  </View>
+</Modal>
   </ScrollView>
 );
 };
+
 const RemindersScreen = () => {
   const navigation = useNavigation();
   const router = useRouter();
