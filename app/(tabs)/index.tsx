@@ -24,11 +24,11 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import LocationMap from '../../components/LocationMap';
 import AssistantScreen from './assistant';
 import { auth, db } from './firebase.js';
 
 import * as Location from 'expo-location';
-import MapView, { Marker } from 'react-native-maps';
 
 // Firebase/auth';
 import {
@@ -890,23 +890,7 @@ const CaregiverDashboard = ({ userProfile, elderlyProfile, onAlertPress }: {
 
       {/* Map */}
       {selectedLocation && (
-        <MapView
-          style={{ flex: 1 }}
-          initialRegion={{
-            latitude: selectedLocation.latitude,
-            longitude: selectedLocation.longitude,
-            latitudeDelta: 0.01,
-            longitudeDelta: 0.01,
-          }}
-        >
-          <Marker
-            coordinate={{
-              latitude: selectedLocation.latitude,
-              longitude: selectedLocation.longitude
-            }}
-            title="Elderly Location"
-          />
-        </MapView>
+        <LocationMap location={selectedLocation} />
       )}
 
     </View>
