@@ -24,7 +24,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import LocationMap from '../../components/LocationMap';
+import LocationMap from '@/components/LocationMap';
 import AssistantScreen from './assistant';
 import { auth, db } from './firebase.js';
 
@@ -34,12 +34,14 @@ import * as Location from 'expo-location';
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
   User
 } from 'firebase/auth';
 
-import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, setDoc, updateDoc } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, setDoc, updateDoc, where } from 'firebase/firestore';
 
 type UserRole = 'elderly' | 'caregiver';
 type UserProfile = {
@@ -146,59 +148,171 @@ const AuthScreen = ({ onSuccess }: { onSuccess: () => void }) => {
   const [role, setRole] = useState<UserRole>('elderly');
   const [loading, setLoading] = useState(false);
 
-const handleAuth = async () => {
-  if (!email || !password || (!isLogin && !name)) {
-    Alert.alert('Error', 'Please fill all fields');
-    return;
-  }
-  
-  if (!isLogin && !dateOfBirth) {
-    Alert.alert('Error', 'Please select your date of birth');
-    return;
-  }
-  
-  setLoading(true);
-  try {
-    if (isLogin) {
-      await signInWithEmailAndPassword(auth, email, password);
-    } else {
-      // SIGN UP
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      const user = userCredential.user;
+  // Forgot Password State
+  const [showForgotPasswordModal, setShowForgotPasswordModal] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
 
-      await setDoc(doc(db, 'users', user.uid), {
-        name,
-        email,
-        role,
-        gender,
-        dateOfBirth,
-        uidPrefix12: user.uid.slice(0, 12).toUpperCase(),   
-        linkedCaregiverId: null,
-        linkedElderlyId: null,
-        createdAt: new Date().toISOString(),
-      });
+  // Email Verification State
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+  const [verificationEmail, setVerificationEmail] = useState('');
+  const [checkingVerification, setCheckingVerification] = useState(false);
+  const [resendingEmail, setResendingEmail] = useState(false);
+
+  useEffect(() => {
+    // If user is logged in but unverified, immediately display verification modal
+    if (auth.currentUser && !auth.currentUser.emailVerified) {
+      setVerificationEmail(auth.currentUser.email || '');
+      setShowVerificationModal(true);
     }
-    onSuccess();
-  } catch (e: any) {
-    // Check for specific Firebase auth errors
-    if (e.code === 'auth/invalid-credential' || 
-        e.code === 'auth/wrong-password' || 
-        e.code === 'auth/user-not-found' ||
-        e.code === 'auth/invalid-email') {
-      Alert.alert('Error', 'Wrong email or password');
-    } else if (e.code === 'auth/too-many-requests') {
-      Alert.alert('Error', 'Too many failed attempts. Please try again later.');
-    } else if (e.code === 'auth/email-already-in-use') {
-      Alert.alert('Error', 'This email is already registered');
-    } else if (e.code === 'auth/weak-password') {
-      Alert.alert('Error', 'Password should be at least 6 characters');
-    } else {
-      Alert.alert('Error', e.message);
+  }, []);
+
+  const handleAuth = async () => {
+    if (!email || !password || (!isLogin && !name)) {
+      Alert.alert('Error', 'Please fill all fields');
+      return;
     }
-  } finally {
-    setLoading(false);
-  }
-};
+    
+    if (!isLogin && !dateOfBirth) {
+      Alert.alert('Error', 'Please select your date of birth');
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      if (isLogin) {
+        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
+        const currentUser = userCredential.user;
+
+        // Check if email is verified
+        if (!currentUser.emailVerified) {
+          setVerificationEmail(currentUser.email || email.trim());
+          setShowVerificationModal(true);
+          setLoading(false);
+          return;
+        }
+
+        onSuccess();
+      } else {
+        // SIGN UP
+        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        const user = userCredential.user;
+
+        await setDoc(doc(db, 'users', user.uid), {
+          name,
+          email: email.trim(),
+          role,
+          gender,
+          dateOfBirth,
+          uidPrefix12: user.uid.slice(0, 12).toUpperCase(),   
+          linkedCaregiverId: null,
+          linkedElderlyId: null,
+          createdAt: new Date().toISOString(),
+        });
+
+        // Send Email Verification
+        try {
+          await sendEmailVerification(user);
+        } catch (verErr: any) {
+          console.warn("Failed to send verification email:", verErr.message);
+        }
+
+        setVerificationEmail(user.email || email.trim());
+        setShowVerificationModal(true);
+      }
+    } catch (e: any) {
+      if (e.code === 'auth/invalid-credential' || 
+          e.code === 'auth/wrong-password' || 
+          e.code === 'auth/user-not-found' ||
+          e.code === 'auth/invalid-email') {
+        Alert.alert('Error', 'Wrong email or password');
+      } else if (e.code === 'auth/too-many-requests') {
+        Alert.alert('Error', 'Too many failed attempts. Please try again later.');
+      } else if (e.code === 'auth/email-already-in-use') {
+        Alert.alert('Error', 'This email is already registered');
+      } else if (e.code === 'auth/weak-password') {
+        Alert.alert('Error', 'Password should be at least 6 characters');
+      } else {
+        Alert.alert('Error', e.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    const targetEmail = resetEmail.trim().toLowerCase();
+    if (!targetEmail) {
+      Alert.alert('Error', 'Please enter your registered email address');
+      return;
+    }
+    setResetLoading(true);
+    try {
+      // Check if email is registered in Firestore database
+      const q = query(collection(db, 'users'), where('email', '==', targetEmail));
+      const userSnapshot = await getDocs(q);
+
+      if (userSnapshot.empty) {
+        Alert.alert('Not Registered', 'No account exists with this email address. Please check your spelling or sign up.');
+        setResetLoading(false);
+        return;
+      }
+
+      await sendPasswordResetEmail(auth, targetEmail);
+      Alert.alert(
+        'Reset Link Sent',
+        `A password reset link has been sent to ${targetEmail}. Please check your inbox and spam folder.`,
+        [{ text: 'OK', onPress: () => setShowForgotPasswordModal(false) }]
+      );
+    } catch (error: any) {
+      if (error.code === 'auth/user-not-found') {
+        Alert.alert('Not Registered', 'No account found with this email address');
+      } else if (error.code === 'auth/invalid-email') {
+        Alert.alert('Error', 'Please enter a valid email address');
+      } else {
+        Alert.alert('Error', error.message || 'Failed to send reset email');
+      }
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const checkEmailVerification = async () => {
+    setCheckingVerification(true);
+    try {
+      if (auth.currentUser) {
+        await auth.currentUser.reload();
+        if (auth.currentUser.emailVerified) {
+          setShowVerificationModal(false);
+          Alert.alert('Success', 'Your email has been verified! Welcome to ElderlyApp.');
+          onSuccess();
+        } else {
+          Alert.alert(
+            'Not Verified Yet',
+            'We could not detect your email verification yet. Please open your email and click the verification link, then tap this button again.'
+          );
+        }
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Could not verify status');
+    } finally {
+      setCheckingVerification(false);
+    }
+  };
+
+  const resendVerificationEmail = async () => {
+    setResendingEmail(true);
+    try {
+      if (auth.currentUser) {
+        await sendEmailVerification(auth.currentUser);
+        Alert.alert('Sent', `A new verification email was sent to ${verificationEmail}. Please check your inbox and spam folder.`);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to resend verification email');
+    } finally {
+      setResendingEmail(false);
+    }
+  };
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.white }}>
@@ -207,7 +321,16 @@ const handleAuth = async () => {
           <Text style={styles.authTitle}>{isLogin ? 'Welcome Back' : 'Create Account'}</Text>
 
           {!isLogin && (
-            <TextInput style={styles.input} placeholder="Your Name" value={name} onChangeText={setName} />
+            <TextInput 
+              style={[styles.input, { color: '#000000' }]} 
+              placeholder="Your Name" 
+              placeholderTextColor="#888888"
+              cursorColor="#007AFF"
+              selectionColor="rgba(0, 122, 255, 0.4)"
+              autoCorrect={false}
+              value={name} 
+              onChangeText={setName} 
+            />
           )}
           
           {!isLogin && (
@@ -262,21 +385,41 @@ const handleAuth = async () => {
           )}
           
           <TextInput 
-            style={styles.input} 
+            style={[styles.input, { color: '#000000' }]} 
             placeholder="Email" 
-            keyboardType="email-address" 
+            placeholderTextColor="#888888"
+            cursorColor="#007AFF"
+            selectionColor="rgba(0, 122, 255, 0.4)"
+            keyboardType="default"
             autoCapitalize="none" 
+            autoCorrect={false}
+            spellCheck={false}
             value={email} 
-            onChangeText={setEmail} />
+            onChangeText={setEmail} 
+          />
           <TextInput 
-            style={styles.input} 
+            style={[styles.input, { color: '#000000' }]} 
             placeholder="Password" 
+            placeholderTextColor="#888888"
+            cursorColor="#007AFF"
+            selectionColor="rgba(0, 122, 255, 0.4)"
             secureTextEntry={true}
             autoCapitalize="none"
             autoCorrect={false}
             value={password} 
             onChangeText={setPassword} 
           />
+
+          {isLogin && (
+            <TouchableOpacity 
+              onPress={() => { setResetEmail(email.trim()); setShowForgotPasswordModal(true); }}
+              style={{ width: 320, alignSelf: 'center', alignItems: 'flex-end', marginTop: 2, marginBottom: 18 }}
+            >
+              <Text style={{ color: COLORS.primaryBlue, fontSize: 14, fontWeight: '600' }}>
+                Forgot Password?
+              </Text>
+            </TouchableOpacity>
+          )}
 
           {!isLogin && (
             <View style={styles.roleContainer}>
@@ -311,6 +454,102 @@ const handleAuth = async () => {
           </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* --- FORGOT PASSWORD MODAL --- */}
+      <Modal visible={showForgotPasswordModal} transparent={true} animationType="slide">
+        <View style={styles.authModalOverlay}>
+          <View style={styles.authModalBox}>
+            <View style={{ alignItems: 'center', marginBottom: 15 }}>
+              <View style={styles.authModalIcon}>
+                <Ionicons name="key-outline" size={32} color={COLORS.primaryBlue} />
+              </View>
+              <Text style={styles.authModalTitle}>Reset Password</Text>
+              <Text style={styles.authModalDesc}>
+                Enter your registered email address and we'll send you a password reset link.
+              </Text>
+            </View>
+
+            <TextInput 
+              style={[styles.input, { width: '100%', marginBottom: 20 }]} 
+              placeholder="Enter your email" 
+              placeholderTextColor="#888888"
+              cursorColor="#007AFF"
+              selectionColor="rgba(0, 122, 255, 0.4)"
+              keyboardType="default"
+              autoCapitalize="none" 
+              autoCorrect={false}
+              value={resetEmail} 
+              onChangeText={setResetEmail} 
+            />
+
+            <TouchableOpacity 
+              style={[styles.authButton, { width: '100%', marginTop: 0 }]} 
+              onPress={handleForgotPassword} 
+              disabled={resetLoading}
+            >
+              {resetLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.authButtonText}>Send Reset Link</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={{ marginTop: 15, padding: 10, alignItems: 'center' }} 
+              onPress={() => setShowForgotPasswordModal(false)}
+            >
+              <Text style={{ color: COLORS.gray, fontSize: 15, fontWeight: '600' }}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* --- EMAIL VERIFICATION MODAL --- */}
+      <Modal visible={showVerificationModal} transparent={true} animationType="fade">
+        <View style={styles.authModalOverlay}>
+          <View style={styles.authModalBox}>
+            <View style={{ alignItems: 'center', marginBottom: 20 }}>
+              <View style={[styles.authModalIcon, { backgroundColor: '#EFF6FF' }]}>
+                <Ionicons name="mail-unread-outline" size={36} color={COLORS.primaryBlue} />
+              </View>
+              <Text style={styles.authModalTitle}>Verify Your Email</Text>
+              <Text style={styles.authModalDesc}>
+                A verification link was sent to:
+              </Text>
+              <Text style={{ fontSize: 16, fontWeight: 'bold', color: COLORS.primaryBlue, marginVertical: 6, textAlign: 'center' }}>
+                {verificationEmail}
+              </Text>
+              <Text style={[styles.authModalDesc, { marginTop: 6 }]}>
+                Please click the link in your email to verify your account.
+              </Text>
+            </View>
+
+            <TouchableOpacity 
+              style={[styles.authButton, { width: '100%', marginTop: 0 }]} 
+              onPress={checkEmailVerification} 
+              disabled={checkingVerification}
+            >
+              {checkingVerification ? <ActivityIndicator color="#fff" /> : <Text style={styles.authButtonText}>I've Verified My Email</Text>}
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={{ marginTop: 12, padding: 8, alignItems: 'center' }} 
+              onPress={resendVerificationEmail}
+              disabled={resendingEmail}
+            >
+              <Text style={{ color: COLORS.primaryBlue, fontSize: 14, fontWeight: '600' }}>
+                {resendingEmail ? 'Sending...' : 'Resend Verification Email'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={{ marginTop: 8, padding: 8, alignItems: 'center' }} 
+              onPress={async () => {
+                await signOut(auth);
+                setShowVerificationModal(false);
+              }}
+            >
+              <Text style={{ color: COLORS.gray, fontSize: 14, fontWeight: '500' }}>Back to Login</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -1431,24 +1670,28 @@ const ProfileScreen = ({ userProfile }: { userProfile: UserProfile }) => {
 
       {/* Invite Caregiver for Elderly Users */}
       {userProfile.role === 'elderly' && auth.currentUser && (
-        <Card style={{ marginHorizontal: 20, marginTop: 20, padding: 20 }}>
+        <Card style={{ marginHorizontal: 20, marginTop: 20, padding: 18 }}>
           <Text style={styles.cardTitle}>Invite Your Caregiver</Text>
-          <Text style={{ color: COLORS.gray, marginVertical: 10, fontSize: 15 }}>
+          <Text style={{ color: COLORS.gray, marginVertical: 8, fontSize: 14 }}>
             Share this code with your caregiver:
           </Text>
           <View style={{
             flexDirection: 'row',
-            backgroundColor: '#f0f0f0',
-            padding: 18,
-            borderRadius: 15,
+            backgroundColor: '#f5f5f5',
+            paddingVertical: 12,
+            paddingHorizontal: 14,
+            borderRadius: 12,
             alignItems: 'center',
-            justifyContent: 'space-between'
+            justifyContent: 'space-between',
+            marginTop: 4,
           }}>
             <Text style={{
-              fontSize: 26,
+              fontSize: 18,
               fontWeight: 'bold',
-              letterSpacing: 5,
-              color: COLORS.primaryBlue
+              letterSpacing: 2,
+              color: COLORS.primaryBlue,
+              flexShrink: 1,
+              textAlign: 'left',
             }}>
               {auth.currentUser.uid.slice(0, 12).toUpperCase()}
             </Text>
@@ -1463,14 +1706,15 @@ const ProfileScreen = ({ userProfile }: { userProfile: UserProfile }) => {
               }}
               style={{
                 backgroundColor: COLORS.primaryBlue,
-                width: 50,
-                height: 50,
-                borderRadius: 25,
+                width: 36,
+                height: 36,
+                borderRadius: 18,
                 justifyContent: 'center',
-                alignItems: 'center'
+                alignItems: 'center',
+                marginLeft: 10,
               }}
             >
-              <Ionicons name="share-social" size={28} color="white" />
+              <Ionicons name="share-social" size={18} color="white" />
             </TouchableOpacity>
           </View>
         </Card>
@@ -1742,10 +1986,16 @@ export default function TabsScreen() {
       if (profileUnsubscribe) profileUnsubscribe();
 
       if (currentUser) {
-        setUser(currentUser);
-        // Start listening for profile changes in real-time
-        profileUnsubscribe = fetchUserProfile(currentUser); 
-        
+        // Enforce strict email verification
+        if (!currentUser.emailVerified) {
+          setUser(currentUser);
+          setUserProfile(null);
+          setLoading(false);
+        } else {
+          setUser(currentUser);
+          // Start listening for profile changes in real-time
+          profileUnsubscribe = fetchUserProfile(currentUser); 
+        }
       } else {
         setUser(null);
         setUserProfile(null);
@@ -1770,7 +2020,11 @@ export default function TabsScreen() {
   }
 
   if (!user || !userProfile) {
-    return <AuthScreen onSuccess={() => {}} />; 
+    return <AuthScreen onSuccess={() => {
+      if (auth.currentUser && auth.currentUser.emailVerified) {
+        fetchUserProfile(auth.currentUser);
+      }
+    }} />; 
   }
 
   return (
@@ -1804,13 +2058,59 @@ const styles = StyleSheet.create({
     alignItems: 'center', 
   },
 
+  authModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  authModalBox: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  authModalIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#EFF6FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  authModalTitle: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#111827',
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  authModalDesc: {
+    fontSize: 14,
+    color: '#6B7280',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+
   input: { 
     width: 320,           
-    backgroundColor: '#f5f5f5', 
+    backgroundColor: '#FFFFFF', 
     padding: 16,
     borderRadius: 12, 
     marginBottom: 15, 
     fontSize: 16,
+    color: '#000000',
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1',
     alignSelf: 'center',  
   },
 

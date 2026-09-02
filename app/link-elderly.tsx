@@ -77,6 +77,9 @@ export default function LinkElderlyScreen() {
           value={code}
           onChangeText={setCode}
           placeholder="AB3D5F7G9H1J"
+          placeholderTextColor="#999"
+          cursorColor="#007AFF"
+          selectionColor="#007AFF"
           autoCapitalize="characters"
           maxLength={12}
         />
@@ -121,6 +124,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 18,
     fontSize: 20,
+    color: '#000',
     textAlign: 'center',
     letterSpacing: 2,
   },
